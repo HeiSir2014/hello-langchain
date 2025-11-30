@@ -15,14 +15,20 @@ import { callOllamaWithTools } from "./ollama";
 import { DEFAULT_MODEL, getModelConfig, supportsToolCalling } from "../config";
 import { log } from "../logger";
 import { ui } from "../ui";
+import {
+  shouldTrimMessages,
+  buildSummaryPrompt,
+  countMessageTokens,
+} from "./memory";
 
 // ============ 配置 ============
 
 // 当前模型
 let currentModel = DEFAULT_MODEL;
 
-// 递归限制（防止无限循环）
-const RECURSION_LIMIT = 25;
+// 递归限制（设置一个较高的值作为安全网，主要依赖 token 管理）
+// 由于我们现在使用 token 管理来控制上下文，递归限制只是最后的保护
+const RECURSION_LIMIT = 200;
 
 // 是否需要工具调用确认
 let requireToolConfirmation = false;
@@ -80,7 +86,7 @@ export function newThread(): string {
 // Agent 节点 - 调用 LLM
 const agentNode = async (
   state: typeof MessagesAnnotation.State,
-  config?: RunnableConfig
+  _config?: RunnableConfig
 ) => {
   const startTime = Date.now();
   const modelConfig = getModelConfig(currentModel);
@@ -89,16 +95,12 @@ const agentNode = async (
   log.nodeStart("agent", state);
   log.agentThinking(modelName);
 
-  // 检查递归限制
-  const currentStep = (config?.metadata as any)?.langgraph_step || 0;
-  if (currentStep >= RECURSION_LIMIT * 0.8) {
-    log.warn("Approaching recursion limit", { step: currentStep, limit: RECURSION_LIMIT });
-    ui.warn(`接近递归限制 (${currentStep}/${RECURSION_LIMIT})，将尝试直接回答`);
-  }
+  // 获取可用工具
+  const availableTools = supportsToolCalling(currentModel) ? tools : [];
 
   const response = await callOllamaWithTools(
     state.messages,
-    supportsToolCalling(currentModel) ? tools : [],
+    availableTools,
     modelName,
     true
   );
@@ -172,6 +174,74 @@ const toolConfirmationNode = async (state: typeof MessagesAnnotation.State) => {
 // 创建工具节点
 const toolNode = new ToolNode(tools);
 
+// 总结节点 - 当消息历史过长时使用 LLM 生成总结
+const summarizeNode = async (
+  state: typeof MessagesAnnotation.State,
+  _config?: RunnableConfig
+) => {
+  const startTime = Date.now();
+  const modelConfig = getModelConfig(currentModel);
+  const modelName = modelConfig?.model || currentModel;
+
+  log.nodeStart("summarize", state);
+  ui.info("消息历史过长，正在生成摘要...");
+
+  // 计算需要总结的消息数量（保留最近的消息）
+  const keepCount = 10; // 保留最近 10 条消息
+  const messagesToSummarize = state.messages.slice(0, -keepCount);
+  const recentMessages = state.messages.slice(-keepCount);
+
+  if (messagesToSummarize.length === 0) {
+    log.debug("No messages to summarize");
+    return { messages: [] };
+  }
+
+  // 构建总结 prompt
+  const summaryPrompt = buildSummaryPrompt(messagesToSummarize);
+
+  log.info("Generating summary with LLM", {
+    messagesToSummarize: messagesToSummarize.length,
+    recentMessages: recentMessages.length,
+    model: modelName,
+  });
+
+  try {
+    // 使用当前模型生成总结（不带工具）
+    const response = await callOllamaWithTools(
+      [new HumanMessage(summaryPrompt)],
+      [], // 不使用工具
+      modelName,
+      true
+    );
+
+    const summaryContent = typeof response.content === "string"
+      ? response.content
+      : JSON.stringify(response.content);
+
+    // 创建摘要系统消息
+    const summaryMessage = new AIMessage({
+      content: `[对话历史摘要]\n${summaryContent}\n[摘要结束]`,
+      id: `summary_${Date.now()}`,
+    });
+
+    log.info("Summary generated", {
+      summaryLength: summaryContent.length,
+      durationMs: Date.now() - startTime,
+    });
+
+    log.nodeEnd("summarize", { messages: [summaryMessage] }, Date.now() - startTime);
+
+    // 返回摘要消息，替换被总结的消息
+    // 注意：这里需要使用 RemoveMessage 来移除旧消息
+    // 但由于 LangGraph 的限制，我们暂时只添加摘要消息
+    return { messages: [summaryMessage] };
+  } catch (error: any) {
+    log.error("Failed to generate summary", { error: error.message });
+    log.nodeEnd("summarize", { error: error.message }, Date.now() - startTime);
+    return { messages: [] };
+  }
+};
+
 // ============ 条件边 ============
 
 // 判断是否需要调用工具
@@ -223,12 +293,35 @@ const afterConfirmation = (
   return "tools";
 };
 
+// 检查消息点 - 在进入 agent 之前检查是否需要总结
+const checkMessages = (
+  state: typeof MessagesAnnotation.State
+): "summarize" | "agent" => {
+  const { messages } = state;
+  const modelConfig = getModelConfig(currentModel);
+  const modelName = modelConfig?.model || currentModel;
+
+  // 检查是否需要总结
+  if (shouldTrimMessages(messages, modelName)) {
+    log.conditionalEdge("check", "checkMessages", "summarize");
+    log.info("Messages exceed threshold, routing to summarize", {
+      messageCount: messages.length,
+      tokens: countMessageTokens(messages),
+    });
+    return "summarize";
+  }
+
+  log.conditionalEdge("check", "checkMessages", "agent");
+  return "agent";
+};
+
 // ============ 构建 Graph ============
 
 const graphBuilder = new StateGraph(MessagesAnnotation)
   .addNode("agent", agentNode)
   .addNode("confirm_tools", toolConfirmationNode)
   .addNode("tools", toolNode)
+  .addNode("summarize", summarizeNode)
   .addEdge(START, "agent")
   .addConditionalEdges("agent", shouldContinue, {
     tools: "tools",
@@ -239,7 +332,13 @@ const graphBuilder = new StateGraph(MessagesAnnotation)
     tools: "tools",
     [END]: END,
   })
-  .addEdge("tools", "agent");
+  // 工具执行后检查是否需要总结
+  .addConditionalEdges("tools", checkMessages, {
+    summarize: "summarize",
+    agent: "agent",
+  })
+  // 总结后继续执行 agent
+  .addEdge("summarize", "agent");
 
 // 编译 Graph（带 checkpointer 支持持久化）
 const graph = graphBuilder.compile({
