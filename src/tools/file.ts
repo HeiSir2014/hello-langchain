@@ -78,8 +78,8 @@ export const Read = tool(
 - 返回文件元数据（总行数、大小等）`,
     schema: z.object({
       file_path: z.string().describe("文件路径（相对或绝对路径）"),
-      offset: z.number().optional().describe("从第几行开始读取（0-indexed），默认 0"),
-      limit: z.number().optional().describe("读取多少行，默认 200"),
+      offset: z.coerce.number().optional().describe("从第几行开始读取（0-indexed），默认 0"),
+      limit: z.coerce.number().optional().describe("读取多少行，默认 200"),
     }),
   }
 );
@@ -322,9 +322,9 @@ ${metadata.preview}
       pattern: z.string().describe("搜索模式（支持正则表达式）"),
       path: z.string().optional().describe("搜索路径，默认当前目录"),
       glob: z.string().optional().describe("文件类型过滤，如 *.ts, *.js, *.{ts,tsx}"),
-      context: z.number().optional().describe("显示匹配行前后的上下文行数，默认 0"),
-      ignore_case: z.boolean().optional().describe("是否忽略大小写，默认 false"),
-      max_results: z.number().optional().describe("最大结果数量，默认 500"),
+      context: z.coerce.number().optional().describe("显示匹配行前后的上下文行数，默认 0"),
+      ignore_case: z.coerce.boolean().optional().describe("是否忽略大小写，默认 false"),
+      max_results: z.coerce.number().optional().describe("最大结果数量，默认 500"),
     }),
   }
 );

@@ -133,7 +133,7 @@ ${metadata.preview}
 - 支持管道、重定向等 bash 特性`,
     schema: z.object({
       command: z.string().describe("要执行的 shell 命令"),
-      timeout: z.number().optional().describe("超时时间（毫秒），默认 30000"),
+      timeout: z.coerce.number().optional().describe("超时时间（毫秒），默认 30000"),
     }),
   }
 );
