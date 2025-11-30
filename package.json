@@ -1,0 +1,32 @@
+{
+  "name": "hello-langchain",
+  "version": "1.0.0",
+  "description": "",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "tsx src/index.ts",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "dependencies": {
+    "@langchain/core": "^1.1.0",
+    "@langchain/langgraph": "^1.0.2",
+    "@vscode/ripgrep": "^1.17.0",
+    "dotenv": "^17.2.3",
+    "glob": "^13.0.0",
+    "ollama": "^0.6.3",
+    "winston": "^3.18.3",
+    "zod": "^4.1.13",
+    "zod-to-json-schema": "^3.25.0"
+  },
+  "devDependencies": {
+    "@types/glob": "^8.1.0",
+    "@types/node": "^24.10.1",
+    "tsx": "^4.20.6",
+    "typescript": "^5.7.2"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs"
+}
