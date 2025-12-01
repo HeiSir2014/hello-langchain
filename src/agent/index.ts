@@ -12,7 +12,8 @@ import { AIMessage, HumanMessage, BaseMessage, ToolMessage } from "@langchain/co
 import { RunnableConfig } from "@langchain/core/runnables";
 import { tools } from "../tools";
 import { callOllamaWithTools } from "./ollama";
-import { DEFAULT_MODEL, getModelConfig, supportsToolCalling } from "../config";
+import { callOpenRouterWithTools } from "./openrouter";
+import { DEFAULT_MODEL, getModelConfig, supportsToolCalling, ProviderType } from "../config";
 import { log } from "../logger";
 import { ui } from "../ui";
 import {
@@ -91,6 +92,7 @@ const agentNode = async (
   const startTime = Date.now();
   const modelConfig = getModelConfig(currentModel);
   const modelName = modelConfig?.model || currentModel;
+  const provider = modelConfig?.provider || ProviderType.OLLAMA;
 
   log.nodeStart("agent", state);
   log.agentThinking(modelName);
@@ -98,12 +100,10 @@ const agentNode = async (
   // 获取可用工具
   const availableTools = supportsToolCalling(currentModel) ? tools : [];
 
-  const response = await callOllamaWithTools(
-    state.messages,
-    availableTools,
-    modelName,
-    true
-  );
+  // 根据 provider 选择调用不同的 LLM
+  const response = provider === ProviderType.OPENROUTER
+    ? await callOpenRouterWithTools(state.messages, availableTools, modelName, true)
+    : await callOllamaWithTools(state.messages, availableTools, modelName, true);
 
   log.nodeEnd("agent", { messages: [response] }, Date.now() - startTime);
 
@@ -182,6 +182,7 @@ const summarizeNode = async (
   const startTime = Date.now();
   const modelConfig = getModelConfig(currentModel);
   const modelName = modelConfig?.model || currentModel;
+  const provider = modelConfig?.provider || ProviderType.OLLAMA;
 
   log.nodeStart("summarize", state);
   ui.info("消息历史过长，正在生成摘要...");
@@ -203,16 +204,14 @@ const summarizeNode = async (
     messagesToSummarize: messagesToSummarize.length,
     recentMessages: recentMessages.length,
     model: modelName,
+    provider,
   });
 
   try {
-    // 使用当前模型生成总结（不带工具）
-    const response = await callOllamaWithTools(
-      [new HumanMessage(summaryPrompt)],
-      [], // 不使用工具
-      modelName,
-      true
-    );
+    // 根据 provider 选择调用不同的 LLM（不带工具）
+    const response = provider === ProviderType.OPENROUTER
+      ? await callOpenRouterWithTools([new HumanMessage(summaryPrompt)], [], modelName, true)
+      : await callOllamaWithTools([new HumanMessage(summaryPrompt)], [], modelName, true);
 
     const summaryContent = typeof response.content === "string"
       ? response.content

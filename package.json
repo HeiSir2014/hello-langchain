@@ -11,6 +11,7 @@
   "dependencies": {
     "@langchain/core": "^1.1.0",
     "@langchain/langgraph": "^1.0.2",
+    "@openrouter/sdk": "^0.1.27",
     "@vscode/ripgrep": "^1.17.0",
     "dotenv": "^17.2.3",
     "glob": "^13.0.0",

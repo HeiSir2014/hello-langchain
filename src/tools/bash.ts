@@ -64,7 +64,6 @@ export const Bash = tool(
         timeout,
         maxBuffer: 1024 * 1024 * 50, // 50MB
         cwd: process.cwd(),
-        shell: "/bin/bash",
       });
 
       const output = result.trim();
@@ -130,7 +129,8 @@ ${metadata.preview}
     description: `执行 shell 命令。用于运行系统命令、脚本等操作。
 - 如果输出超过 ${OUTPUT_THRESHOLD} 字符，会保存到临时文件
 - 返回临时文件路径和元数据，可用 Read 工具查看完整内容
-- 支持管道、重定向等 bash 特性`,
+- 支持管道、重定向等 shell 特性
+- shell 环境：${process.env.SHELL || process.platform === "win32" ? "cmd" : "bash"} 系统：${process.platform}`,
     schema: z.object({
       command: z.string().describe("要执行的 shell 命令"),
       timeout: z.coerce.number().optional().describe("超时时间（毫秒），默认 30000"),

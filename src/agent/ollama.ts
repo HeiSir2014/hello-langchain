@@ -2,12 +2,17 @@ import { Ollama } from "ollama";
 import { zodToJsonSchema } from "zod-to-json-schema";
 import { AIMessage, HumanMessage, ToolMessage, BaseMessage } from "@langchain/core/messages";
 import { StructuredToolInterface } from "@langchain/core/tools";
-import { OLLAMA_HOST } from "../config";
+import { OLLAMA_HOST, OLLAMA_CLOUD_HOST, OLLAMA_CLOUD_API_KEY, getModelConfig, ModelType } from "../config";
 import { log } from "../logger";
 import { ui } from "../ui";
 
 // 创建 Ollama 客户端
 const ollama = new Ollama({ host: OLLAMA_HOST });
+const ollamaCloud = new Ollama({
+  host: OLLAMA_CLOUD_HOST, headers: {
+    Authorization: "Bearer " + OLLAMA_CLOUD_API_KEY,
+  },
+});
 
 // Ollama 工具定义格式
 interface OllamaTool {
@@ -126,13 +131,16 @@ export async function callOllamaWithTools(
     streamMode: stream,
   });
 
+  const modelConfig = getModelConfig(modelName);
+  const ollamaClient = modelConfig?.type === ModelType.CLOUD ? ollamaCloud : ollama;
+
   if (stream) {
     // 流式调用
     ui.modelStart(modelName);
     log.debug("Starting streaming response");
 
     try {
-      const response = await ollama.chat({
+      const response = await ollamaClient.chat({
         model: modelName,
         messages: ollamaMessages,
         tools: ollamaTools,
@@ -212,7 +220,7 @@ export async function callOllamaWithTools(
     log.debug("Starting non-streaming response");
 
     try {
-      const response = await ollama.chat({
+      const response = await ollamaClient.chat({
         model: modelName,
         messages: ollamaMessages,
         tools: ollamaTools,
@@ -268,8 +276,11 @@ export async function chatWithOllama(
 
   ui.modelStart(modelName);
 
+  const modelConfig = getModelConfig(modelName);
+  const ollamaClient = modelConfig?.type === ModelType.CLOUD ? ollamaCloud : ollama;
+
   try {
-    const response = await ollama.chat({
+    const response = await ollamaClient.chat({
       model: modelName,
       messages: ollamaMessages,
       stream: true,
