@@ -1,123 +1,90 @@
+#!/usr/bin/env node
 import * as readline from "readline";
 import { HumanMessage } from "@langchain/core/messages";
 import {
   DEFAULT_MODEL,
   getModelConfig,
-  listModels,
-} from "./config";
+  ALL_MODELS,
+  USE_PROVIDER,
+} from "./config.js";
 import {
-  chat,
   multiTurnChat,
   clearHistory,
   getHistory,
   setAgentModel,
   getAgentModel,
-  setToolConfirmation,
-  getToolConfirmation,
   getThreadId,
-  newThread,
-  resume,
-  getState,
-} from "./agent";
-import { toolDescriptions } from "./tools";
-import { log, resetSessionId, LOG_DIR } from "./logger";
-import { ui } from "./ui";
-
-// 等待工具确认的状态
-let pendingConfirmation = false;
+  compactHistory,
+} from "./agent/index.js";
+import { toolDescriptions } from "./tools/index.js";
+import { log, resetSessionId, LOG_DIR } from "./logger.js";
+import { ui, colors } from "./ui.js";
 
 // 切换模型
 function switchModel(modelName: string): boolean {
   const config = getModelConfig(modelName);
   if (!config) {
-    ui.error(`模型 "${modelName}" 不存在，可用模型：`);
-    listModels();
+    ui.error(`Model "${modelName}" not found`);
     return false;
   }
 
   setAgentModel(modelName);
-  ui.modelSwitch(config.model, config.type, config.supportsTools ?? false);
+  ui.modelSwitched(config.model, config.provider || "");
   return true;
 }
 
-// 显示帮助信息
+// 显示帮助
 function showHelp(): void {
-  ui.system(`
-命令:
-  /help, /h           显示帮助信息
-  /list, /l           列出所有可用模型
-  /model <名称>        切换模型 (如: /model qwen3:4b)
-  /tools              显示可用工具列表
-  /clear, /c          清除对话历史（创建新线程）
-  /history            显示对话历史
-  /thread             显示当前线程 ID
-  /confirm [on|off]   开启/关闭敏感工具确认
-  /state              显示当前 Graph 状态
-  /exit, /quit        退出程序
-
-示例:
-  /model qwen3:4b
-  列出当前目录的文件
-  读取 package.json 文件内容
-  搜索包含 ollama 的代码
-`);
+  ui.help();
 }
 
 // 显示工具列表
 function showTools(): void {
-  ui.heading("可用工具");
-  toolDescriptions.forEach((t) => {
-    ui.listItem(`🔧 ${t.name.padEnd(10)} - ${t.description}`);
-  });
-  ui.newline();
+  ui.toolList(toolDescriptions);
+}
+
+// 显示模型列表
+function showModels(): void {
+  const currentModel = getAgentModel();
+  const models = ALL_MODELS.map((m) => ({
+    name: m.name,
+    model: m.model,
+    type: m.type,
+    provider: m.provider || "",
+    current: m.name === currentModel,
+  }));
+  ui.modelList(models);
 }
 
 // 显示对话历史
 async function showHistory(): Promise<void> {
   const history = await getHistory();
   if (history.length === 0) {
-    ui.info("暂无对话历史");
+    ui.info("No conversation history");
     return;
   }
-  ui.heading(`对话历史 (线程: ${getThreadId()})`);
+
+  ui.heading(`History (${history.length} messages)`);
   history.forEach((msg, i) => {
-    const role = msg instanceof HumanMessage ? "👤 用户" : "🤖 助手";
+    const role = msg instanceof HumanMessage ? "You" : "Assistant";
     const content = typeof msg.content === "string" ? msg.content : JSON.stringify(msg.content);
-    ui.listItem(`${i + 1}. ${role}: ${content.slice(0, 100)}${content.length > 100 ? "..." : ""}`);
+    const preview = content.length > 80 ? content.slice(0, 80) + "..." : content;
+    ui.listItem(`${colors.dim}${i + 1}.${colors.reset} ${colors.bold}${role}:${colors.reset} ${preview}`);
   });
   ui.newline();
-}
-
-// 显示当前状态
-async function showState(): Promise<void> {
-  try {
-    const state = await getState();
-    ui.heading("Graph 状态");
-    ui.listItem(`线程 ID: ${getThreadId()}`);
-    ui.listItem(`消息数: ${state.values?.messages?.length || 0}`);
-    ui.listItem(`下一节点: ${state.next?.join(", ") || "无"}`);
-    if (state.metadata) {
-      ui.listItem(`步骤: ${(state.metadata as any).step || 0}`);
-    }
-    ui.newline();
-  } catch (error: any) {
-    ui.error(`获取状态失败: ${error.message}`);
-  }
 }
 
 // 交互式模式
 async function interactiveMode(): Promise<void> {
   const config = getModelConfig(getAgentModel());
 
+  ui.welcome();
   ui.startup({
     model: config?.model || getAgentModel(),
-    description: config?.description,
+    provider: USE_PROVIDER,
+    cwd: process.cwd(),
     supportsTools: config?.supportsTools ?? false,
-    logDir: LOG_DIR,
   });
-
-  ui.info(`线程 ID: ${getThreadId()}`);
-  ui.info(`工具确认: ${getToolConfirmation() ? "开启" : "关闭"}`);
 
   log.sessionStart(getAgentModel());
 
@@ -126,26 +93,12 @@ async function interactiveMode(): Promise<void> {
     output: process.stdout,
   });
 
-  const prompt = (): void => {
-    const promptText = pendingConfirmation ? "确认 (y/n): " : "👤 你: ";
-    rl.question(promptText, async (input) => {
+  const askQuestion = (): void => {
+    rl.question(ui.prompt(), async (input) => {
       const trimmed = input.trim();
 
       if (!trimmed) {
-        prompt();
-        return;
-      }
-
-      // 处理工具确认
-      if (pendingConfirmation) {
-        pendingConfirmation = false;
-        try {
-          await resume(trimmed.toLowerCase());
-        } catch (error: any) {
-          ui.error(`恢复执行失败: ${error.message || error}`);
-          log.error("Resume error", { error: error.message });
-        }
-        prompt();
+        askQuestion();
         return;
       }
 
@@ -171,7 +124,7 @@ async function interactiveMode(): Promise<void> {
 
           case "list":
           case "l":
-            listModels();
+            showModels();
             break;
 
           case "model":
@@ -179,8 +132,7 @@ async function interactiveMode(): Promise<void> {
             if (args[0]) {
               switchModel(args[0]);
             } else {
-              ui.info(`当前模型: ${getAgentModel()}`);
-              ui.info("请指定模型名称，例如: /model qwen3:4b");
+              ui.info(`Current model: ${getAgentModel()}`);
             }
             break;
 
@@ -192,6 +144,7 @@ async function interactiveMode(): Promise<void> {
           case "c":
             clearHistory();
             resetSessionId();
+            ui.cleared();
             break;
 
           case "history":
@@ -199,53 +152,45 @@ async function interactiveMode(): Promise<void> {
             break;
 
           case "thread":
-            ui.info(`当前线程: ${getThreadId()}`);
+            ui.info(`Thread: ${getThreadId()}`);
             break;
 
-          case "confirm":
-            if (args[0] === "on") {
-              setToolConfirmation(true);
-              ui.success("敏感工具确认已开启（Bash, Write, Edit 需确认）");
-            } else if (args[0] === "off") {
-              setToolConfirmation(false);
-              ui.success("敏感工具确认已关闭");
-            } else {
-              ui.info(`工具确认: ${getToolConfirmation() ? "开启" : "关闭"}`);
-              ui.info("使用 /confirm on 或 /confirm off 切换");
+          case "compact":
+            try {
+              const { before, after } = await compactHistory();
+              if (before === after) {
+                ui.info("No messages to compact");
+              } else {
+                ui.success(`Compacted: ${before} → ${after} messages`);
+              }
+            } catch (err: any) {
+              ui.error(`Compact failed: ${err.message}`);
             }
             break;
 
-          case "state":
-            await showState();
-            break;
-
           default:
-            ui.warn(`未知命令: /${cmd}，输入 /help 查看帮助`);
+            ui.warn(`Unknown command: /${cmd}`);
         }
 
-        prompt();
+        askQuestion();
         return;
       }
 
       // 处理对话
+      ui.userMessage(trimmed);
+
       try {
         await multiTurnChat(trimmed);
       } catch (error: any) {
-        // 检查是否是 interrupt
-        if (error.message?.includes("interrupt") || error.__interrupt__) {
-          pendingConfirmation = true;
-          ui.info("等待确认...");
-        } else {
-          ui.error(`调用失败: ${error.message || error}`);
-          log.error("Chat error", { error: error.message });
-        }
+        ui.error(error.message || String(error));
+        log.error("Chat error", { error: error.message });
       }
 
-      prompt();
+      askQuestion();
     });
   };
 
-  prompt();
+  askQuestion();
 }
 
 // 主函数
@@ -256,28 +201,25 @@ async function main() {
   setAgentModel(DEFAULT_MODEL);
 
   // 处理命令行参数
-  if (args.includes("--list") || args.includes("-l")) {
-    listModels();
+  if (args.includes("--help") || args.includes("-h")) {
+    console.log(`
+Usage: yterm [options]
+
+Options:
+  -m, --model <name>   Set model
+  -l, --list           List models
+  -h, --help           Show help
+
+Examples:
+  yterm                Start interactive mode
+  yterm -l             List available models
+  yterm -m gpt-4o      Use GPT-4o model
+`);
     return;
   }
 
-  if (args.includes("--help") || args.includes("-h")) {
-    ui.system(`
-用法: npm start [选项] [消息]
-
-选项:
-  -m, --model <名称>   指定模型 (默认: ${DEFAULT_MODEL})
-  -l, --list           列出所有模型
-  -i, --interactive    进入交互式模式
-  --confirm            启用敏感工具确认
-  -h, --help           显示帮助
-
-示例:
-  npm start                              # 交互式模式 (默认)
-  npm start -- -m qwen3:4b "列出文件"     # 单次对话
-  npm start -- --list                    # 列出模型
-  npm start -- --confirm -i              # 带工具确认的交互模式
-`);
+  if (args.includes("--list") || args.includes("-l")) {
+    showModels();
     return;
   }
 
@@ -287,38 +229,8 @@ async function main() {
     switchModel(args[modelIndex + 1]);
   }
 
-  // 启用工具确认
-  if (args.includes("--confirm")) {
-    setToolConfirmation(true);
-  }
-
-  // 交互式模式
-  if (args.includes("--interactive") || args.includes("-i")) {
-    await interactiveMode();
-    return;
-  }
-
-  // 过滤掉选项参数，获取实际消息
-  const filteredArgs = args.filter((_, i) => {
-    if (i === modelIndex || i === modelIndex + 1) return false;
-    return true;
-  }).filter((a) => !a.startsWith("-"));
-
-  // 如果没有消息参数，进入交互式模式
-  if (filteredArgs.length === 0) {
-    await interactiveMode();
-    return;
-  }
-
-  const message = filteredArgs.join(" ");
-  ui.userInput(message);
-
-  try {
-    await chat(message);
-  } catch (error: any) {
-    ui.error(`调用失败: ${error.message || error}`);
-    log.error("Chat error", { error: error.message });
-  }
+  // 进入交互式模式
+  await interactiveMode();
 }
 
 main();

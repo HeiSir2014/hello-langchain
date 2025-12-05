@@ -8,24 +8,126 @@ import {
   Command,
 } from "@langchain/langgraph";
 import { ToolNode } from "@langchain/langgraph/prebuilt";
-import { AIMessage, HumanMessage, BaseMessage, ToolMessage } from "@langchain/core/messages";
+import { AIMessage, AIMessageChunk, HumanMessage, SystemMessage, BaseMessage, ToolMessage, isAIMessage, RemoveMessage } from "@langchain/core/messages";
 import { RunnableConfig } from "@langchain/core/runnables";
-import { tools } from "../tools";
-import { callOllamaWithTools } from "./ollama";
-import { callOpenRouterWithTools } from "./openrouter";
-import { DEFAULT_MODEL, getModelConfig, supportsToolCalling, ProviderType } from "../config";
-import { log } from "../logger";
-import { ui } from "../ui";
+import { tools, getTodos } from "../tools/index.js";
+import { callChatModel, simpleChatWithModel } from "./models.js";
+import { DEFAULT_MODEL, getModelConfig, supportsToolCalling } from "../config.js";
+import { log } from "../logger.js";
+import { ui } from "../ui.js";
 import {
   shouldTrimMessages,
   buildSummaryPrompt,
   countMessageTokens,
-} from "./memory";
+  trimMessages,
+} from "./memory.js";
+import {
+  generateContextInjection,
+  wrapToolResult,
+  generateTodoWriteHint,
+} from "../context/index.js";
+
+// ============ 辅助函数 ============
+
+// 从 Anthropic 的 content 数组中提取文本内容
+function extractTextContent(content: any): string {
+  if (typeof content === "string") {
+    return content;
+  }
+  if (Array.isArray(content)) {
+    return content
+      .map((part) => {
+        if (typeof part === "string") return part;
+        if (part && typeof part === "object" && "text" in part) return part.text;
+        return "";
+      })
+      .join("");
+  }
+  return String(content);
+}
 
 // ============ 配置 ============
 
 // 当前模型
 let currentModel = DEFAULT_MODEL;
+
+// 获取 Git 状态
+function getGitStatus(): string {
+  try {
+    const { execSync } = require("child_process");
+    const branch = execSync("git branch --show-current", { encoding: "utf-8", cwd: process.cwd() }).trim();
+    const status = execSync("git status --short", { encoding: "utf-8", cwd: process.cwd() }).trim();
+    const recentCommits = execSync("git log --oneline -5", { encoding: "utf-8", cwd: process.cwd() }).trim();
+    return `Current branch: ${branch}\n\nStatus:\n${status || "(clean)"}\n\nRecent commits:\n${recentCommits}`;
+  } catch {
+    return "Git status unavailable";
+  }
+}
+
+// 构建系统提示
+function buildSystemPrompt(): string {
+  const isWindows = process.platform === "win32";
+  const isMac = process.platform === "darwin";
+  const osName = isWindows ? "Windows" : isMac ? "macOS" : "Linux";
+
+  const windowsNotes = `- This is a Windows system. Use Windows commands instead of Unix commands:
+  - Use \`cd\` instead of \`pwd\` to show current directory
+  - Use \`dir\` instead of \`ls\` to list files
+  - Use \`type\` instead of \`cat\` to display file contents
+  - Use \`copy\` instead of \`cp\`, \`move\` instead of \`mv\`, \`del\` instead of \`rm\`
+  - Use \`rmdir /s /q\` instead of \`rm -rf\`
+- Or use PowerShell commands (e.g., \`Get-Location\`, \`Get-ChildItem\`)
+- Path separator is backslash (\\\\) but forward slash (/) often works too`;
+
+  const unixNotes = `- This is a Unix-like system. Standard Unix commands are available.
+- Shell: ${process.env.SHELL || "/bin/bash"}`;
+
+  return `You are Claude Code, Anthropic's official CLI for Claude.
+You are an interactive CLI tool that helps users with software engineering tasks. Use the instructions below and the tools available to you to assist the user.
+
+IMPORTANT: You must NEVER generate or guess URLs for the user unless you are confident that the URLs are for helping the user with programming. You may use URLs provided by the user in their messages or local files.
+
+# Tone and style
+- Only use emojis if the user explicitly requests it. Avoid using emojis in all communication unless asked.
+- Your output will be displayed on a command line interface. Your responses should be short and concise. You can use Github-flavored markdown for formatting.
+- Output text to communicate with the user; all text you output outside of tool use is displayed to the user. Only use tools to complete tasks. Never use tools like Bash or code comments as means to communicate with the user during the session.
+- NEVER create files unless they're absolutely necessary for achieving your goal. ALWAYS prefer editing an existing file to creating a new one. This includes markdown files.
+
+# Professional objectivity
+Prioritize technical accuracy and truthfulness over validating the user's beliefs. Focus on facts and problem-solving, providing direct, objective technical info without any unnecessary superlatives, praise, or emotional validation. It is best for the user if Claude honestly applies the same rigorous standards to all ideas and disagrees when necessary, even if it may not be what the user wants to hear.
+
+# Task Management
+You have access to the TodoWrite tool to help you manage and plan tasks. Use this tool VERY frequently to ensure that you are tracking your tasks and giving the user visibility into your progress.
+These tools are also EXTREMELY helpful for planning tasks, and for breaking down larger complex tasks into smaller steps. If you do not use this tool when planning, you may forget to do important tasks - and that is unacceptable.
+
+It is critical that you mark todos as completed as soon as you are done with a task. Do not batch up multiple tasks before marking them as completed.
+
+# Doing tasks
+The user will primarily request you perform software engineering tasks. This includes solving bugs, adding new functionality, refactoring code, explaining code, and more. For these tasks the following steps are recommended:
+- Use the TodoWrite tool to plan the task if required
+- NEVER propose changes to code you haven't read. If a user asks about or wants you to modify a file, read it first. Understand existing code before suggesting modifications.
+- Be careful not to introduce security vulnerabilities such as command injection, XSS, SQL injection, and other OWASP top 10 vulnerabilities. If you notice that you wrote insecure code, immediately fix it.
+- Avoid over-engineering. Only make changes that are directly requested or clearly necessary. Keep solutions simple and focused.
+
+# Tool usage policy
+- You can call multiple tools in a single response. If you intend to call multiple tools and there are no dependencies between them, make all independent tool calls in parallel. Maximize use of parallel tool calls where possible to increase efficiency.
+- Use specialized tools instead of bash commands when possible. For file operations, use dedicated tools: Read for reading files instead of cat/head/tail, Edit for editing instead of sed/awk, and Write for creating files instead of cat with heredoc or echo redirection. Reserve bash tools exclusively for actual system commands and terminal operations that require shell execution.
+- NEVER use bash echo or other command-line tools to communicate thoughts, explanations, or instructions to the user. Output all communication directly in your response text instead.
+
+# Environment Information
+<env>
+Working directory: ${process.cwd()}
+Is directory a git repo: Yes
+Platform: ${process.platform}
+Today's date: ${new Date().toISOString().split("T")[0]}
+</env>
+
+# Important Notes for ${osName}
+${isWindows ? windowsNotes : unixNotes}
+
+gitStatus: This is the git status at the start of the conversation. Note that this status is a snapshot in time, and will not update during the conversation.
+${getGitStatus()}`;
+}
 
 // 递归限制（设置一个较高的值作为安全网，主要依赖 token 管理）
 // 由于我们现在使用 token 管理来控制上下文，递归限制只是最后的保护
@@ -92,7 +194,6 @@ const agentNode = async (
   const startTime = Date.now();
   const modelConfig = getModelConfig(currentModel);
   const modelName = modelConfig?.model || currentModel;
-  const provider = modelConfig?.provider || ProviderType.OLLAMA;
 
   log.nodeStart("agent", state);
   log.agentThinking(modelName);
@@ -100,10 +201,32 @@ const agentNode = async (
   // 获取可用工具
   const availableTools = supportsToolCalling(currentModel) ? tools : [];
 
-  // 根据 provider 选择调用不同的 LLM
-  const response = provider === ProviderType.OPENROUTER
-    ? await callOpenRouterWithTools(state.messages, availableTools, modelName, true)
-    : await callOllamaWithTools(state.messages, availableTools, modelName, true);
+  // 准备消息列表：如果没有系统消息，添加系统提示
+  let messagesWithSystem = [...state.messages];
+  const hasSystemMessage = state.messages.some(m => m instanceof SystemMessage);
+  if (!hasSystemMessage) {
+    // 延迟构建系统提示，确保环境信息是最新的
+    const systemPrompt = buildSystemPrompt();
+    messagesWithSystem = [new SystemMessage(systemPrompt), ...messagesWithSystem];
+  }
+
+  // 注入上下文到最后一条用户消息（CLAUDE.md、todo 列表等）
+  const contextInjection = generateContextInjection();
+  if (contextInjection) {
+    // 找到最后一条用户消息并注入上下文
+    for (let i = messagesWithSystem.length - 1; i >= 0; i--) {
+      const msg = messagesWithSystem[i];
+      if (msg instanceof HumanMessage) {
+        const originalContent = typeof msg.content === "string" ? msg.content : String(msg.content);
+        messagesWithSystem[i] = new HumanMessage(originalContent + "\n" + contextInjection);
+        log.debug("Context injected into user message", { contextLength: contextInjection.length });
+        break;
+      }
+    }
+  }
+
+  // 使用统一的聊天模型接口
+  const response = await callChatModel(messagesWithSystem, availableTools, currentModel, true);
 
   log.nodeEnd("agent", { messages: [response] }, Date.now() - startTime);
 
@@ -116,13 +239,14 @@ const toolConfirmationNode = async (state: typeof MessagesAnnotation.State) => {
   const startTime = Date.now();
 
   const lastMessage = state.messages[state.messages.length - 1];
+  const toolCalls = isAIMessage(lastMessage) ? lastMessage.tool_calls : undefined;
 
-  if (!(lastMessage instanceof AIMessage) || !lastMessage.tool_calls?.length) {
+  if (!toolCalls?.length) {
     log.debug("No tool calls to confirm");
     return { messages: [] };
   }
 
-  const sensitiveToolCalls = lastMessage.tool_calls.filter(
+  const sensitiveToolCalls = toolCalls.filter(
     tc => SENSITIVE_TOOLS.includes(tc.name)
   );
 
@@ -133,13 +257,13 @@ const toolConfirmationNode = async (state: typeof MessagesAnnotation.State) => {
 
   log.info("Requesting tool confirmation", {
     sensitiveTools: sensitiveToolCalls.map(tc => tc.name),
-    totalToolCalls: lastMessage.tool_calls.length,
+    totalToolCalls: toolCalls.length,
   });
 
   // 显示需要确认的工具
   ui.warn("以下工具需要确认后执行:");
   sensitiveToolCalls.forEach((tc, i) => {
-    ui.listItem(`${i + 1}. ${tc.name}(${JSON.stringify(tc.args).slice(0, 100)}...)`, 1);
+    ui.listItem(`${i + 1}. ${tc.name}(${JSON.stringify(tc.args).slice(0, 100)}...)`);
   });
 
   // 使用 interrupt 等待用户确认
@@ -175,6 +299,7 @@ const toolConfirmationNode = async (state: typeof MessagesAnnotation.State) => {
 const toolNode = new ToolNode(tools);
 
 // 总结节点 - 当消息历史过长时使用 LLM 生成总结
+// 按照 LangGraph 官方推荐：使用 RemoveMessage 删除旧消息，保留摘要
 const summarizeNode = async (
   state: typeof MessagesAnnotation.State,
   _config?: RunnableConfig
@@ -182,15 +307,33 @@ const summarizeNode = async (
   const startTime = Date.now();
   const modelConfig = getModelConfig(currentModel);
   const modelName = modelConfig?.model || currentModel;
-  const provider = modelConfig?.provider || ProviderType.OLLAMA;
 
   log.nodeStart("summarize", state);
-  ui.info("消息历史过长，正在生成摘要...");
+  ui.info("Context limit approaching, generating summary...");
 
-  // 计算需要总结的消息数量（保留最近的消息）
-  const keepCount = 10; // 保留最近 10 条消息
-  const messagesToSummarize = state.messages.slice(0, -keepCount);
-  const recentMessages = state.messages.slice(-keepCount);
+  // 分离系统消息和其他消息
+  const systemMessages = state.messages.filter(m => m instanceof SystemMessage);
+  const nonSystemMessages = state.messages.filter(m => !(m instanceof SystemMessage));
+
+  // 保留最近的消息（确保工具调用完整性）
+  const keepCount = 10;
+
+  // 找到安全的分割点 - 确保不会打断工具调用对
+  let splitIndex = Math.max(0, nonSystemMessages.length - keepCount);
+
+  // 向前调整分割点，确保不在 AIMessage(tool_calls) 之后立即切断
+  while (splitIndex > 0) {
+    const msg = nonSystemMessages[splitIndex - 1];
+    // 如果前一条是带 tool_calls 的 AIMessage，需要保留对应的 ToolMessage
+    if (isAIMessage(msg) && msg.tool_calls && msg.tool_calls.length > 0) {
+      splitIndex--;
+    } else {
+      break;
+    }
+  }
+
+  const messagesToSummarize = nonSystemMessages.slice(0, splitIndex);
+  const recentMessages = nonSystemMessages.slice(splitIndex);
 
   if (messagesToSummarize.length === 0) {
     log.debug("No messages to summarize");
@@ -204,39 +347,50 @@ const summarizeNode = async (
     messagesToSummarize: messagesToSummarize.length,
     recentMessages: recentMessages.length,
     model: modelName,
-    provider,
   });
 
   try {
-    // 根据 provider 选择调用不同的 LLM（不带工具）
-    const response = provider === ProviderType.OPENROUTER
-      ? await callOpenRouterWithTools([new HumanMessage(summaryPrompt)], [], modelName, true)
-      : await callOllamaWithTools([new HumanMessage(summaryPrompt)], [], modelName, true);
+    // 使用统一的聊天模型接口（不带工具）
+    const summaryContent = await simpleChatWithModel(
+      [new HumanMessage(summaryPrompt)],
+      currentModel
+    );
 
-    const summaryContent = typeof response.content === "string"
-      ? response.content
-      : JSON.stringify(response.content);
-
-    // 创建摘要系统消息
-    const summaryMessage = new AIMessage({
-      content: `[对话历史摘要]\n${summaryContent}\n[摘要结束]`,
+    // 创建摘要消息（使用 HumanMessage 作为上下文提示，避免与 AI 响应混淆）
+    const summaryMessage = new HumanMessage({
+      content: `[Previous Conversation Summary]\n${summaryContent}\n[End of Summary - The conversation continues below]`,
       id: `summary_${Date.now()}`,
     });
 
+    // 使用 RemoveMessage 删除被总结的旧消息
+    // LangGraph 的 add_messages reducer 会处理这些删除操作
+    const removeMessages = messagesToSummarize
+      .filter(m => m.id) // 只删除有 id 的消息
+      .map(m => new RemoveMessage({ id: m.id! }));
+
     log.info("Summary generated", {
       summaryLength: summaryContent.length,
+      removedMessages: removeMessages.length,
+      keptMessages: recentMessages.length,
       durationMs: Date.now() - startTime,
     });
 
-    log.nodeEnd("summarize", { messages: [summaryMessage] }, Date.now() - startTime);
+    ui.success(`Summarized ${messagesToSummarize.length} messages`);
 
-    // 返回摘要消息，替换被总结的消息
-    // 注意：这里需要使用 RemoveMessage 来移除旧消息
-    // 但由于 LangGraph 的限制，我们暂时只添加摘要消息
-    return { messages: [summaryMessage] };
+    log.nodeEnd("summarize", {
+      summaryMessage: true,
+      removedCount: removeMessages.length
+    }, Date.now() - startTime);
+
+    // 返回：先添加摘要消息，再发送删除指令
+    // LangGraph 的 MessagesAnnotation 会按顺序处理这些操作
+    return {
+      messages: [summaryMessage, ...removeMessages]
+    };
   } catch (error: any) {
     log.error("Failed to generate summary", { error: error.message });
     log.nodeEnd("summarize", { error: error.message }, Date.now() - startTime);
+    ui.error("Summary generation failed, continuing without summarization");
     return { messages: [] };
   }
 };
@@ -250,14 +404,21 @@ const shouldContinue = (
   const { messages } = state;
   const lastMessage = messages[messages.length - 1];
 
-  if (
-    lastMessage instanceof AIMessage &&
-    lastMessage.tool_calls &&
-    lastMessage.tool_calls.length > 0
-  ) {
+  // 使用 isAIMessage 来检查，它同时支持 AIMessage 和 AIMessageChunk
+  // 参考: https://js.langchain.com/docs/how_to/tool_calling/
+  const toolCalls = isAIMessage(lastMessage) ? lastMessage.tool_calls : undefined;
+
+  log.debug("shouldContinue check", {
+    lastMessageType: lastMessage?.constructor?.name,
+    isAIMessage: isAIMessage(lastMessage),
+    hasToolCalls: !!(toolCalls && toolCalls.length > 0),
+    toolCallsCount: toolCalls?.length || 0,
+  });
+
+  if (toolCalls && toolCalls.length > 0) {
     // 检查是否需要工具确认
     if (requireToolConfirmation) {
-      const hasSensitiveTools = lastMessage.tool_calls.some(
+      const hasSensitiveTools = toolCalls.some(
         tc => SENSITIVE_TOOLS.includes(tc.name)
       );
       if (hasSensitiveTools) {
@@ -283,7 +444,7 @@ const afterConfirmation = (
 
   // 如果确认节点返回了取消消息，则结束
   if (
-    lastMessage instanceof AIMessage &&
+    isAIMessage(lastMessage) &&
     lastMessage.content === "工具执行已取消。"
   ) {
     return END;
@@ -355,16 +516,17 @@ function handleStreamUpdate(nodeName: string, update: any): void {
 
   if (nodeName === "agent" && update.messages) {
     const lastMsg = update.messages[update.messages.length - 1];
-    if (lastMsg instanceof AIMessage && lastMsg.tool_calls && lastMsg.tool_calls.length > 0) {
+    const msgToolCalls = isAIMessage(lastMsg) ? lastMsg.tool_calls : undefined;
+    if (msgToolCalls && msgToolCalls.length > 0) {
       log.info("Agent requesting tool calls", {
-        toolCount: lastMsg.tool_calls.length,
-        tools: lastMsg.tool_calls.map((tc: any) => tc.name),
+        toolCount: msgToolCalls.length,
+        tools: msgToolCalls.map((tc: any) => tc.name),
       });
-      ui.toolRequest(lastMsg.tool_calls.length, lastMsg.tool_calls.map((tc: any) => ({
+      ui.toolsSummary(msgToolCalls.map((tc: any) => ({
         name: tc.name,
         args: tc.args,
       })));
-    } else if (lastMsg instanceof AIMessage) {
+    } else if (isAIMessage(lastMsg)) {
       log.debug("Agent response (no tool calls)", {
         contentLength: typeof lastMsg.content === "string" ? lastMsg.content.length : 0,
       });
@@ -459,8 +621,8 @@ export async function chat(message: string): Promise<string> {
     });
 
     const lastMessage = resultMessages[resultMessages.length - 1];
-    const response = lastMessage instanceof AIMessage
-      ? lastMessage.content as string
+    const response = isAIMessage(lastMessage)
+      ? (typeof lastMessage.content === "string" ? lastMessage.content : extractTextContent(lastMessage.content))
       : String(lastMessage.content);
 
     log.info("Single chat completed", {
@@ -488,8 +650,8 @@ export async function multiTurnChat(message: string): Promise<string> {
     });
 
     const lastMessage = resultMessages[resultMessages.length - 1];
-    const response = lastMessage instanceof AIMessage
-      ? lastMessage.content as string
+    const response = isAIMessage(lastMessage)
+      ? (typeof lastMessage.content === "string" ? lastMessage.content : extractTextContent(lastMessage.content))
       : String(lastMessage.content);
 
     log.info("Multi-turn chat completed", {
@@ -517,8 +679,8 @@ export async function resume(value: any): Promise<string> {
     );
 
     const lastMessage = resultMessages[resultMessages.length - 1];
-    const response = lastMessage instanceof AIMessage
-      ? lastMessage.content as string
+    const response = isAIMessage(lastMessage)
+      ? (typeof lastMessage.content === "string" ? lastMessage.content : extractTextContent(lastMessage.content))
       : String(lastMessage.content);
 
     log.info("Resume completed", {
@@ -554,6 +716,46 @@ export function clearHistory(): void {
 export async function getHistory(): Promise<BaseMessage[]> {
   const state = await getState();
   return state.values?.messages || [];
+}
+
+// 压缩对话历史（手动触发）
+// 使用 RemoveMessage 来删除旧消息，保持与 summarizeNode 一致
+export async function compactHistory(): Promise<{ before: number; after: number }> {
+  const state = await getState();
+  const messages: BaseMessage[] = state.values?.messages || [];
+
+  if (messages.length === 0) {
+    return { before: 0, after: 0 };
+  }
+
+  const trimmedMessages = trimMessages(messages, currentModel);
+
+  if (trimmedMessages.length < messages.length) {
+    // 找出需要删除的消息
+    const trimmedIds = new Set(trimmedMessages.map(m => m.id).filter(Boolean));
+    const messagesToRemove = messages.filter(m => m.id && !trimmedIds.has(m.id));
+
+    // 使用 RemoveMessage 来删除旧消息
+    const removeMessages = messagesToRemove.map(m => new RemoveMessage({ id: m.id! }));
+
+    // 更新状态 - 发送删除指令
+    await graph.updateState(
+      getRunConfig(),
+      { messages: removeMessages },
+      "compact"
+    );
+
+    log.info("History compacted manually using RemoveMessage", {
+      before: messages.length,
+      after: trimmedMessages.length,
+      removed: messagesToRemove.length,
+    });
+  }
+
+  return {
+    before: messages.length,
+    after: trimmedMessages.length,
+  };
 }
 
 // 导出

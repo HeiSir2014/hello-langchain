@@ -5,11 +5,18 @@
  * 当上下文接近 token 限制时，自动总结早期消息
  */
 
-import { BaseMessage, HumanMessage, AIMessage, ToolMessage } from "@langchain/core/messages";
-import { getModelContextWindow } from "../config";
+import { BaseMessage, HumanMessage, AIMessage, SystemMessage, ToolMessage } from "@langchain/core/messages";
+import { getModelContextWindow } from "../config.js";
+import { log } from "../logger.js";
 
 // Token 限制阈值（达到此比例时开始裁剪）
-const TOKEN_TRIM_THRESHOLD = 0.7; // 70%
+const TOKEN_TRIM_THRESHOLD = 0.8; // 80%
+
+// 保留最近的消息数量（不会被裁剪）
+const KEEP_RECENT_MESSAGES = 10;
+
+// 最大工具结果长度
+const MAX_TOOL_RESULT_LENGTH = 10000;
 
 // ============ Token 计数 ============
 
@@ -151,4 +158,160 @@ export function shouldTrimMessages(messages: BaseMessage[], modelName: string): 
   const currentTokens = countMessageTokens(messages);
 
   return currentTokens > trimThreshold;
+}
+
+// ============ 消息裁剪 ============
+
+/**
+ * 截断过长的工具结果
+ */
+function truncateToolResult(content: string): string {
+  if (content.length <= MAX_TOOL_RESULT_LENGTH) {
+    return content;
+  }
+
+  // 保留前后部分
+  const halfLength = Math.floor(MAX_TOOL_RESULT_LENGTH / 2);
+  const head = content.slice(0, halfLength);
+  const tail = content.slice(-halfLength);
+
+  return `${head}\n\n... [truncated ${content.length - MAX_TOOL_RESULT_LENGTH} characters] ...\n\n${tail}`;
+}
+
+/**
+ * 压缩消息 - 截断过长的工具结果
+ */
+function compressMessage(msg: BaseMessage): BaseMessage {
+  if (msg instanceof ToolMessage) {
+    const content = typeof msg.content === "string" ? msg.content : JSON.stringify(msg.content);
+    if (content.length > MAX_TOOL_RESULT_LENGTH) {
+      return new ToolMessage({
+        content: truncateToolResult(content),
+        tool_call_id: msg.tool_call_id,
+        name: msg.name,
+      });
+    }
+  }
+  return msg;
+}
+
+/**
+ * 裁剪消息以适应上下文窗口
+ *
+ * 策略：
+ * 1. 保留系统消息
+ * 2. 保留最近 N 条消息
+ * 3. 压缩工具结果
+ * 4. 移除较早的消息
+ *
+ * @param messages 消息数组
+ * @param modelName 模型名称
+ * @returns 裁剪后的消息数组
+ */
+export function trimMessages(messages: BaseMessage[], modelName: string): BaseMessage[] {
+  const contextLimit = getModelContextWindow(modelName);
+  const maxTokens = Math.floor(contextLimit * TOKEN_TRIM_THRESHOLD);
+
+  // 分离系统消息
+  const systemMessages = messages.filter(m => m instanceof SystemMessage);
+  const nonSystemMessages = messages.filter(m => !(m instanceof SystemMessage));
+
+  // 压缩所有消息中的工具结果
+  let compressedMessages = nonSystemMessages.map(compressMessage);
+
+  // 计算系统消息的 token
+  const systemTokens = countMessageTokens(systemMessages);
+  const availableTokens = maxTokens - systemTokens;
+
+  if (availableTokens <= 0) {
+    log.warn("System messages exceed token limit");
+    return [...systemMessages, ...compressedMessages.slice(-KEEP_RECENT_MESSAGES)];
+  }
+
+  // 保留最近的消息
+  const recentMessages = compressedMessages.slice(-KEEP_RECENT_MESSAGES);
+  const olderMessages = compressedMessages.slice(0, -KEEP_RECENT_MESSAGES);
+
+  let recentTokens = countMessageTokens(recentMessages);
+  let remainingTokens = availableTokens - recentTokens;
+
+  // 如果最近消息就超过了限制，需要进一步裁剪
+  if (remainingTokens < 0) {
+    log.warn("Recent messages exceed token limit, truncating further");
+
+    // 保留尽可能多的最近消息
+    let kept: BaseMessage[] = [];
+    let tokens = 0;
+
+    for (let i = compressedMessages.length - 1; i >= 0; i--) {
+      const msgTokens = countMessageTokens([compressedMessages[i]]);
+      if (tokens + msgTokens <= availableTokens) {
+        kept.unshift(compressedMessages[i]);
+        tokens += msgTokens;
+      } else {
+        break;
+      }
+    }
+
+    log.info("Messages trimmed", {
+      original: messages.length,
+      kept: kept.length,
+      removedCount: messages.length - kept.length - systemMessages.length,
+    });
+
+    return [...systemMessages, ...kept];
+  }
+
+  // 从旧消息中保留尽可能多的内容
+  let keptOlder: BaseMessage[] = [];
+  let olderTokens = 0;
+
+  for (const msg of olderMessages) {
+    const msgTokens = countMessageTokens([msg]);
+    if (olderTokens + msgTokens <= remainingTokens) {
+      keptOlder.push(msg);
+      olderTokens += msgTokens;
+    } else {
+      break;
+    }
+  }
+
+  const finalMessages = [...systemMessages, ...keptOlder, ...recentMessages];
+
+  if (keptOlder.length < olderMessages.length) {
+    log.info("Messages trimmed", {
+      original: messages.length,
+      kept: finalMessages.length,
+      removedCount: olderMessages.length - keptOlder.length,
+    });
+
+    // 在裁剪点添加一个摘要提示
+    if (keptOlder.length > 0 || olderMessages.length > 0) {
+      const removedCount = olderMessages.length - keptOlder.length;
+      const summaryNote = new HumanMessage({
+        content: `[Previous ${removedCount} messages have been removed to fit context window. The conversation continues from here.]`,
+      });
+
+      return [...systemMessages, summaryNote, ...keptOlder, ...recentMessages];
+    }
+  }
+
+  return finalMessages;
+}
+
+/**
+ * 自动裁剪消息（在调用 LLM 之前使用）
+ */
+export function autoTrimMessages(messages: BaseMessage[], modelName: string): BaseMessage[] {
+  if (!shouldTrimMessages(messages, modelName)) {
+    return messages;
+  }
+
+  log.info("Auto-trimming messages", {
+    messageCount: messages.length,
+    estimatedTokens: countMessageTokens(messages),
+    modelName,
+  });
+
+  return trimMessages(messages, modelName);
 }

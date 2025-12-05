@@ -1,237 +1,350 @@
 /**
- * UI 输出模块 - 处理用户可见的控制台输出
- * 所有 UI 输出同时记录到日志文件
+ * UI 输出模块 - Claude Code 风格的控制台交互
  */
 
-import { log } from "./logger";
+import { log } from "./logger.js";
 
 // ANSI 颜色码
 const colors = {
   reset: "\x1b[0m",
   bold: "\x1b[1m",
   dim: "\x1b[2m",
+  italic: "\x1b[3m",
+  underline: "\x1b[4m",
 
+  black: "\x1b[30m",
   red: "\x1b[31m",
   green: "\x1b[32m",
   yellow: "\x1b[33m",
   blue: "\x1b[34m",
   magenta: "\x1b[35m",
   cyan: "\x1b[36m",
+  white: "\x1b[37m",
   gray: "\x1b[90m",
+
+  bgBlack: "\x1b[40m",
+  bgRed: "\x1b[41m",
+  bgGreen: "\x1b[42m",
+  bgYellow: "\x1b[43m",
+  bgBlue: "\x1b[44m",
+  bgMagenta: "\x1b[45m",
+  bgCyan: "\x1b[46m",
+  bgWhite: "\x1b[47m",
 };
 
-// 图标
-const icons = {
-  robot: "🤖",
-  user: "👤",
-  tool: "🔧",
-  folder: "📁",
-  file: "📄",
-  search: "🔍",
-  edit: "✏️",
-  write: "📝",
-  read: "📖",
-  success: "✅",
-  error: "❌",
-  warning: "⚠️",
-  info: "💡",
-  refresh: "🔄",
-  rocket: "🚀",
-  wave: "👋",
-};
-
-// 去除 ANSI 颜色码的工具函数
+// 去除 ANSI 颜色码
 function stripAnsi(str: string): string {
   return str.replace(/\x1b\[[0-9;]*m/g, "");
 }
 
-// UI 输出类
+// Spinner 动画帧
+const spinnerFrames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
 class UI {
-  // 当前流式输出的内容缓冲
   private streamBuffer: string = "";
+  private spinnerInterval: NodeJS.Timeout | null = null;
+  private spinnerFrame: number = 0;
+  private currentSpinnerText: string = "";
+  private isStreaming: boolean = false;
 
-  // 系统消息
-  system(message: string): void {
-    console.log(`${colors.cyan}${message}${colors.reset}`);
-    log.info(`[UI:system] ${stripAnsi(message)}`);
+  // ============ 基础输出 ============
+
+  // 打印带颜色的文本
+  private print(text: string, color?: string): void {
+    if (color) {
+      console.log(`${color}${text}${colors.reset}`);
+    } else {
+      console.log(text);
+    }
   }
 
-  // 成功消息
-  success(message: string): void {
-    console.log(`${colors.green}${icons.success} ${message}${colors.reset}`);
-    log.info(`[UI:success] ${message}`);
+  // 写入（不换行）
+  private write(text: string): void {
+    process.stdout.write(text);
   }
 
-  // 错误消息
-  error(message: string): void {
-    console.error(`${colors.red}${icons.error} ${message}${colors.reset}`);
-    log.error(`[UI:error] ${message}`);
+  // 清除当前行
+  private clearLine(): void {
+    process.stdout.write("\r\x1b[K");
   }
 
-  // 警告消息
-  warn(message: string): void {
-    console.log(`${colors.yellow}${icons.warning} ${message}${colors.reset}`);
-    log.warn(`[UI:warn] ${message}`);
+  // ============ Spinner ============
+
+  startSpinner(text: string): void {
+    this.stopSpinner();
+    this.currentSpinnerText = text;
+    this.spinnerFrame = 0;
+
+    this.spinnerInterval = setInterval(() => {
+      this.clearLine();
+      const frame = spinnerFrames[this.spinnerFrame % spinnerFrames.length];
+      this.write(`${colors.cyan}${frame}${colors.reset} ${this.currentSpinnerText}`);
+      this.spinnerFrame++;
+    }, 80);
   }
 
-  // 信息提示
-  info(message: string): void {
-    console.log(`${colors.gray}${icons.info} ${message}${colors.reset}`);
-    log.info(`[UI:info] ${message}`);
+  updateSpinner(text: string): void {
+    this.currentSpinnerText = text;
   }
 
-  // 模型响应开始（流式输出前缀）
-  modelStart(modelName: string): void {
-    process.stdout.write(`\n${icons.robot} ${colors.dim}[${modelName}]${colors.reset} `);
+  stopSpinner(finalText?: string): void {
+    if (this.spinnerInterval) {
+      clearInterval(this.spinnerInterval);
+      this.spinnerInterval = null;
+      this.clearLine();
+      if (finalText) {
+        console.log(finalText);
+      }
+    }
+  }
+
+  // ============ 启动信息 ============
+
+  welcome(): void {
+    console.log();
+    console.log(`${colors.bold}╭─────────────────────────────────────╮${colors.reset}`);
+    console.log(`${colors.bold}│${colors.reset}  ${colors.cyan}${colors.bold}yterm${colors.reset} - AI Terminal Assistant    ${colors.bold}│${colors.reset}`);
+    console.log(`${colors.bold}╰─────────────────────────────────────╯${colors.reset}`);
+    console.log();
+  }
+
+  startup(config: {
+    model: string;
+    provider: string;
+    cwd: string;
+    supportsTools: boolean;
+  }): void {
+    console.log(`${colors.dim}Model:${colors.reset} ${config.model}`);
+    console.log(`${colors.dim}Provider:${colors.reset} ${config.provider}`);
+    console.log(`${colors.dim}CWD:${colors.reset} ${config.cwd}`);
+    console.log(`${colors.dim}Tools:${colors.reset} ${config.supportsTools ? "enabled" : "disabled"}`);
+    console.log();
+    console.log(`${colors.dim}Type ${colors.reset}/help${colors.dim} for commands, ${colors.reset}/exit${colors.dim} to quit${colors.reset}`);
+    console.log();
+
+    log.info("[UI:startup]", config);
+  }
+
+  // ============ 提示符 ============
+
+  prompt(): string {
+    return `${colors.bold}${colors.green}>${colors.reset} `;
+  }
+
+  // ============ 消息输出 ============
+
+  // 用户输入
+  userMessage(message: string): void {
+    // 不需要回显，readline 已经显示了
+    log.info("[UI:user]", { message: message.slice(0, 200) });
+  }
+
+  // 模型响应开始
+  modelStart(_modelName?: string): void {
     this.streamBuffer = "";
-    log.info(`[UI:model] Start streaming response`, { model: modelName });
+    this.isStreaming = true;
+    console.log();
   }
 
   // 模型流式输出
   modelStream(content: string): void {
-    process.stdout.write(content);
+    this.write(content);
     this.streamBuffer += content;
   }
 
   // 模型响应结束
   modelEnd(): void {
-    console.log("\n");
-    // 记录完整的模型输出
+    if (this.isStreaming) {
+      console.log();
+      console.log();
+      this.isStreaming = false;
+    }
     if (this.streamBuffer) {
-      log.info(`[UI:model] Response content`, {
+      log.info("[UI:model]", {
         length: this.streamBuffer.length,
-        content: this.streamBuffer.length > 500
-          ? this.streamBuffer.slice(0, 500) + `...(${this.streamBuffer.length} chars)`
-          : this.streamBuffer
+        preview: this.streamBuffer.slice(0, 500),
       });
     }
     this.streamBuffer = "";
   }
 
+  // ============ 工具调用显示 ============
+
   // 工具调用请求
-  toolRequest(toolCount: number, toolCalls: Array<{ name: string; args: any }>): void {
-    console.log(`\n${icons.refresh} 模型请求调用 ${toolCount} 个工具:`);
-    toolCalls.forEach((tc, i) => {
-      const argsStr = JSON.stringify(tc.args);
-      console.log(`   ${i + 1}. ${tc.name}(${argsStr.length > 100 ? argsStr.slice(0, 100) + "..." : argsStr})`);
-    });
-    log.info(`[UI:toolRequest] Model requesting ${toolCount} tool(s)`, {
-      tools: toolCalls.map(tc => ({
-        name: tc.name,
-        args: tc.args,
-      })),
-    });
+  toolRequest(toolName: string, args: Record<string, any>): void {
+    // 格式化参数显示
+    let argsDisplay = "";
+
+    if (toolName === "Bash") {
+      argsDisplay = args.command || "";
+      if (args.description) {
+        console.log(`${colors.dim}$ ${argsDisplay}${colors.reset}`);
+      } else {
+        console.log(`${colors.dim}$ ${argsDisplay.slice(0, 100)}${argsDisplay.length > 100 ? "..." : ""}${colors.reset}`);
+      }
+    } else if (toolName === "Read") {
+      console.log(`${colors.dim}Reading ${args.file_path}${colors.reset}`);
+    } else if (toolName === "Write") {
+      console.log(`${colors.dim}Writing ${args.file_path}${colors.reset}`);
+    } else if (toolName === "Edit") {
+      console.log(`${colors.dim}Editing ${args.file_path}${colors.reset}`);
+    } else if (toolName === "Glob") {
+      console.log(`${colors.dim}Searching ${args.pattern}${colors.reset}`);
+    } else if (toolName === "Grep") {
+      console.log(`${colors.dim}Grep: ${args.pattern}${colors.reset}`);
+    } else if (toolName === "TodoWrite") {
+      const count = args.todos?.length || 0;
+      console.log(`${colors.dim}Updating todo list (${count} items)${colors.reset}`);
+    } else {
+      argsDisplay = JSON.stringify(args);
+      console.log(`${colors.dim}${toolName}: ${argsDisplay.slice(0, 80)}${argsDisplay.length > 80 ? "..." : ""}${colors.reset}`);
+    }
+
+    log.info("[UI:tool]", { tool: toolName, args });
   }
 
-  // 工具执行开始
-  toolStart(toolName: string, detail?: string): void {
-    const detailStr = detail ? `: ${detail}` : "";
-    console.log(`\n${this.getToolIcon(toolName)} [${toolName}]${detailStr}`);
-    log.info(`[UI:toolStart] ${toolName}`, { detail: detail || "" });
-  }
+  // 工具执行结果
+  toolResult(toolName: string, result: string, isError: boolean = false): void {
+    // 简短显示结果
+    const lines = result.split("\n");
+    const displayLines = lines.slice(0, 5);
 
-  // 工具执行成功
-  toolSuccess(toolName: string, summary: string): void {
-    console.log(`${icons.success} [${toolName}] ${summary}`);
-    log.info(`[UI:toolSuccess] ${toolName}: ${summary}`);
-  }
+    if (isError) {
+      console.log(`${colors.red}Error: ${displayLines[0]}${colors.reset}`);
+    } else if (lines.length > 5) {
+      // 对于长输出，只显示行数
+      console.log(`${colors.dim}  (${lines.length} lines)${colors.reset}`);
+    }
 
-  // 工具执行失败
-  toolError(toolName: string, error: string): void {
-    console.log(`${icons.error} [${toolName}] ${error}`);
-    log.error(`[UI:toolError] ${toolName}: ${error}`);
-  }
-
-  // 工具执行结果（从 LangGraph 流式回调中调用）
-  toolResult(toolName: string, result: string): void {
-    console.log(`${colors.dim}   ↳ [${toolName}] ${result}${colors.reset}`);
-    log.info(`[UI:toolResult] ${toolName}`, {
-      resultPreview: result.length > 200 ? result.slice(0, 200) + "..." : result
-    });
-  }
-
-  // 获取工具对应的图标
-  private getToolIcon(toolName: string): string {
-    const iconMap: Record<string, string> = {
-      Bash: icons.tool,
-      Read: icons.read,
-      Write: icons.write,
-      Edit: icons.edit,
-      Glob: icons.folder,
-      Grep: icons.search,
-      LS: icons.folder,
-    };
-    return iconMap[toolName] || icons.tool;
-  }
-
-  // 启动信息
-  startup(config: { model: string; description?: string; supportsTools: boolean; logDir: string }): void {
-    console.log(`\n${icons.rocket} LangGraph + Ollama Agent`);
-    console.log(`📍 当前模型: ${config.model} (${config.description || ""})`);
-    console.log(`🔧 工具调用: ${config.supportsTools ? "已启用" : "不支持"}`);
-    console.log(`📝 日志目录: ${config.logDir}`);
-    console.log(`${icons.info} 输入 /help 查看命令帮助，输入 /exit 退出\n`);
-    log.info(`[UI:startup] Agent started`, {
-      model: config.model,
-      description: config.description,
-      supportsTools: config.supportsTools,
-      logDir: config.logDir,
+    log.info("[UI:toolResult]", {
+      tool: toolName,
+      lines: lines.length,
+      preview: result.slice(0, 200),
     });
   }
 
-  // 模型切换
-  modelSwitch(model: string, type: string, supportsTools: boolean): void {
-    const toolSupport = supportsTools ? "支持工具调用 🔧" : "不支持工具调用 ⚠️";
-    console.log(`已切换到模型: ${model}`);
-    console.log(`  类型: ${type}`);
-    console.log(`  ${toolSupport}`);
-    console.log("");
-    log.info(`[UI:modelSwitch] Switched to model`, { model, type, supportsTools });
+  // 多工具调用摘要
+  toolsSummary(tools: Array<{ name: string; args: any }>): void {
+    if (tools.length === 1) {
+      this.toolRequest(tools[0].name, tools[0].args);
+    } else {
+      console.log(`${colors.dim}Running ${tools.length} tools...${colors.reset}`);
+      tools.forEach((t) => {
+        console.log(`${colors.dim}  • ${t.name}${colors.reset}`);
+      });
+    }
   }
 
-  // 用户输入回显
-  userInput(message: string): void {
-    console.log(`\n${icons.user} 你: ${message}`);
-    log.info(`[UI:userInput] User message`, {
-      message: message.length > 200 ? message.slice(0, 200) + "..." : message
+  // ============ 状态消息 ============
+
+  info(message: string): void {
+    console.log(`${colors.dim}${message}${colors.reset}`);
+    log.info("[UI:info]", { message });
+  }
+
+  success(message: string): void {
+    console.log(`${colors.green}✓${colors.reset} ${message}`);
+    log.info("[UI:success]", { message });
+  }
+
+  error(message: string): void {
+    console.log(`${colors.red}✗${colors.reset} ${message}`);
+    log.error("[UI:error]", { message });
+  }
+
+  warn(message: string): void {
+    console.log(`${colors.yellow}!${colors.reset} ${message}`);
+    log.warn("[UI:warn]", { message });
+  }
+
+  // ============ 帮助信息 ============
+
+  help(): void {
+    console.log();
+    console.log(`${colors.bold}Commands:${colors.reset}`);
+    console.log(`  ${colors.cyan}/help${colors.reset}, ${colors.cyan}/h${colors.reset}         Show this help`);
+    console.log(`  ${colors.cyan}/model${colors.reset} <name>   Switch model`);
+    console.log(`  ${colors.cyan}/list${colors.reset}, ${colors.cyan}/l${colors.reset}        List available models`);
+    console.log(`  ${colors.cyan}/tools${colors.reset}          Show available tools`);
+    console.log(`  ${colors.cyan}/clear${colors.reset}, ${colors.cyan}/c${colors.reset}       Clear conversation`);
+    console.log(`  ${colors.cyan}/history${colors.reset}        Show message history`);
+    console.log(`  ${colors.cyan}/compact${colors.reset}        Compact conversation history`);
+    console.log(`  ${colors.cyan}/exit${colors.reset}, ${colors.cyan}/q${colors.reset}        Exit`);
+    console.log();
+  }
+
+  // 显示模型列表
+  modelList(models: Array<{ name: string; model: string; type: string; provider: string; current: boolean }>): void {
+    console.log();
+    console.log(`${colors.bold}Available Models:${colors.reset}`);
+    models.forEach((m) => {
+      const marker = m.current ? `${colors.green}●${colors.reset}` : " ";
+      const provider = `${colors.dim}[${m.provider}]${colors.reset}`;
+      console.log(`  ${marker} ${m.name} ${provider}`);
     });
+    console.log();
   }
 
-  // 退出消息
+  // 显示工具列表
+  toolList(tools: Array<{ name: string; description: string }>): void {
+    console.log();
+    console.log(`${colors.bold}Available Tools:${colors.reset}`);
+    tools.forEach((t) => {
+      console.log(`  ${colors.cyan}${t.name.padEnd(12)}${colors.reset} ${colors.dim}${t.description}${colors.reset}`);
+    });
+    console.log();
+  }
+
+  // ============ 对话管理 ============
+
+  cleared(): void {
+    console.log(`${colors.dim}Conversation cleared${colors.reset}`);
+    console.log();
+  }
+
+  modelSwitched(model: string, provider: string): void {
+    console.log(`${colors.dim}Switched to ${model} [${provider}]${colors.reset}`);
+    console.log();
+  }
+
+  // ============ 退出 ============
+
   goodbye(): void {
-    console.log(`再见！${icons.wave}`);
-    log.info(`[UI:goodbye] Session ended by user`);
+    console.log();
+    console.log(`${colors.dim}Goodbye!${colors.reset}`);
+    log.info("[UI:goodbye]");
   }
 
-  // 空行
+  // ============ 进度显示 ============
+
+  thinking(): void {
+    this.startSpinner("Thinking...");
+  }
+
+  // ============ 辅助方法 ============
+
   newline(): void {
-    console.log("");
+    console.log();
   }
 
-  // 分隔线
-  divider(char: string = "─", length: number = 40): void {
-    console.log(char.repeat(length));
+  listItem(content: string): void {
+    console.log(`  ${content}`);
   }
 
-  // 列表项
-  listItem(content: string, indent: number = 0): void {
-    const prefix = "  ".repeat(indent);
-    console.log(`${prefix}${content}`);
-    log.debug(`[UI:listItem] ${content}`);
-  }
-
-  // 标题
   heading(title: string): void {
-    console.log(`\n=== ${title} ===`);
-    log.info(`[UI:heading] ${title}`);
+    console.log();
+    console.log(`${colors.bold}${title}${colors.reset}`);
   }
 
-  // 调试信息（仅日志，不输出到控制台）
+  system(message: string): void {
+    console.log(`${colors.dim}${message}${colors.reset}`);
+  }
+
   logOnly(message: string, meta?: Record<string, any>): void {
-    log.debug(`[UI:logOnly] ${message}`, meta);
+    log.debug(message, meta);
   }
 }
 
 // 导出单例
 export const ui = new UI();
-export { icons, colors };
+export { colors };
