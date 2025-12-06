@@ -41,6 +41,7 @@ export const logger = winston.createLogger({
       filename: join(LOG_DIR, "app.log"),
       maxsize: 10 * 1024 * 1024, // 10MB
       maxFiles: 5,
+      tailable: true, // 确保最新日志始终在 app.log 中
     }),
   ],
 });
