@@ -1,0 +1,31 @@
+# Source code
+src/
+*.ts
+!dist/*.js
+!dist/*.d.ts
+
+# Development files
+.vscode/
+.claude/
+CLAUDE.md
+tsconfig.json
+bun.lock
+package-lock.json
+
+# Logs
+logs/
+*.log
+
+# Environment files
+.env
+.env.*
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Test files
+test/
+tests/
+*.test.*
+*.spec.*

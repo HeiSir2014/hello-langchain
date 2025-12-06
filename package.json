@@ -1,5 +1,5 @@
 {
-  "name": "yterm",
+  "name": "yterm-code",
   "version": "1.0.0",
   "description": "AI Terminal Assistant - LangGraph-based CLI with multi-provider support",
   "main": "dist/cli.js",
@@ -48,6 +48,6 @@
   },
   "keywords": ["ai", "cli", "langchain", "langgraph", "ollama", "openai", "anthropic"],
   "author": "",
-  "license": "ISC",
+  "license": "MIT",
   "type": "module"
 }
