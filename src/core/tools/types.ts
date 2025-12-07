@@ -7,7 +7,10 @@
  * - Progress reporting for real-time UI updates
  */
 
-import { StructuredToolInterface } from "@langchain/core/tools";
+import type { StructuredToolInterface } from "@langchain/core/tools";
+
+// Re-export for potential future use
+export type { StructuredToolInterface };
 
 /**
  * Tool metadata for enhanced execution control
@@ -109,6 +112,32 @@ export const TOOL_METADATA: Record<string, ToolMetadata> = {
     category: "search",
   },
   Location: {
+    isReadOnly: true,
+    isConcurrencySafe: true,
+    needsPermission: false,
+    category: "other",
+  },
+  Weather: {
+    isReadOnly: true,
+    isConcurrencySafe: true,
+    needsPermission: false,
+    category: "other",
+  },
+
+  // Plan mode tools
+  ExitPlanMode: {
+    isReadOnly: false,
+    isConcurrencySafe: false,
+    needsPermission: false,
+    category: "other",
+  },
+  SavePlan: {
+    isReadOnly: false,
+    isConcurrencySafe: false,
+    needsPermission: false,
+    category: "other",
+  },
+  ReadPlan: {
     isReadOnly: true,
     isConcurrencySafe: true,
     needsPermission: false,

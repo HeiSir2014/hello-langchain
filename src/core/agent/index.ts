@@ -12,19 +12,27 @@ import { AIMessage, AIMessageChunk, HumanMessage, SystemMessage, BaseMessage, To
 import { RunnableConfig } from "@langchain/core/runnables";
 import {
   tools,
+  allTools,
+  getToolsForCurrentMode,
   getTodos,
   SENSITIVE_TOOLS,
   canRunToolsConcurrently,
   getToolMetadata,
   needsPermission,
+  setPreviousModeBeforePlan,
 } from "../tools/index.js";
+import {
+  getSkillRuntime,
+  getToolsForActiveSkill,
+  getActiveSkillSystemPrompt,
+} from "../skills/index.js";
 import {
   hasToolPermission,
   isSafeBashCommand,
   getCommandPrefix,
   saveToolPermission,
 } from "../permissions.js";
-import { isSafeModeEnabled, getPermissionMode } from "../settings.js";
+import { isSafeModeEnabled, getPermissionMode, isToolAllowedInCurrentMode, PLAN_MODE_TOOLS } from "../settings.js";
 import { callChatModel, simpleChatWithModel } from "./models.js";
 import { getDefaultModel, getModelConfig, supportsToolCalling } from "../config.js";
 import { log } from "../../logger.js";
@@ -51,6 +59,7 @@ import {
   emitResponse,
   emitError,
   emitConfirmRequired,
+  emitCompacting,
   emitAutoCompact,
   emitDone,
   createToolAbortController,
@@ -103,6 +112,7 @@ function buildSystemPrompt(): string {
   const isWindows = process.platform === "win32";
   const isMac = process.platform === "darwin";
   const osName = isWindows ? "Windows" : isMac ? "macOS" : "Linux";
+  const permissionMode = getPermissionMode();
 
   const windowsNotes = `- This is a Windows system. Use Windows commands instead of Unix commands:
   - Use \`cd\` instead of \`pwd\` to show current directory
@@ -115,6 +125,56 @@ function buildSystemPrompt(): string {
 
   const unixNotes = `- This is a Unix-like system. Standard Unix commands are available.
 - Shell: ${process.env.SHELL || "/bin/bash"}`;
+
+  // Active skill instructions
+  const skillRuntime = getSkillRuntime();
+  const activeSkill = skillRuntime.getActiveSkill();
+  const skillInstructions = activeSkill ? `
+
+# ACTIVE SKILL: ${activeSkill.name.toUpperCase()}
+${activeSkill.description}
+
+${activeSkill.systemPrompt || ""}
+
+## Tool Access
+${activeSkill.tools === "*" ? "You have access to all available tools." : `Available tools: ${activeSkill.tools.join(", ")}`}
+${activeSkill.readOnly ? "\n**This is a read-only skill. You CANNOT modify any files.**" : ""}
+` : "";
+
+  // Plan mode specific instructions
+  const planModeInstructions = permissionMode === "plan" ? `
+
+# PLAN MODE ACTIVE
+You are currently in **PLAN MODE** - a research and planning mode for exploring and designing before implementation.
+
+## Available Tools in Plan Mode
+
+**Exploration (read-only):**
+- Read, Glob, Grep, LS - explore the codebase
+- WebSearch, WebFetch - research solutions online
+
+**Planning (can write):**
+- SavePlan - save your plan to a markdown file (.yterm/plan.md)
+- ReadPlan - read a previously saved plan
+- TodoWrite - manage task lists and track progress
+
+**Control:**
+- ExitPlanMode - exit plan mode when ready to implement
+
+## You CANNOT:
+- Edit or create source code files (use Write/Edit tools)
+- Execute bash commands
+- Modify the codebase directly
+
+## Your Role in Plan Mode
+1. Research the codebase to understand existing patterns
+2. Analyze requirements and identify potential issues
+3. Use TodoWrite to break down the task into steps
+4. Use SavePlan to document your implementation plan
+5. Use ExitPlanMode when ready to implement
+
+When you have a complete plan, use the ExitPlanMode tool to return to normal mode with full tool access.
+` : "";
 
   return `You are Claude Code, Anthropic's official CLI for Claude.
 You are an interactive CLI tool that helps users with software engineering tasks. Use the instructions below and the tools available to you to assist the user.
@@ -158,7 +218,7 @@ Today's date: ${new Date().toISOString().split("T")[0]}
 
 # Important Notes for ${osName}
 ${isWindows ? windowsNotes : unixNotes}
-
+${skillInstructions}${planModeInstructions}
 gitStatus: This is the git status at the start of the conversation. Note that this status is a snapshot in time, and will not update during the conversation.
 ${getGitStatus()}`;
 }
@@ -225,6 +285,7 @@ const agentNode = async (
   const startTime = Date.now();
   const modelConfig = getModelConfig(currentModel);
   const modelName = modelConfig?.model || currentModel;
+  const permissionMode = getPermissionMode();
 
   log.nodeStart("agent", state);
   log.agentThinking(modelName);
@@ -232,8 +293,27 @@ const agentNode = async (
   // Emit thinking event
   emitThinking(modelName);
 
-  // 获取可用工具
-  const availableTools = supportsToolCalling(currentModel) ? tools : [];
+  // 根据当前权限模式和活动技能获取可用工具
+  // Priority: permission mode > active skill > all tools
+  const modeTools = getToolsForCurrentMode();
+  const skillRuntime = getSkillRuntime();
+  const activeSkill = skillRuntime.getActiveSkill();
+
+  // If a skill is active, filter tools further by skill's allowed tools
+  let finalTools = modeTools;
+  if (activeSkill && activeSkill.tools !== "*") {
+    const skillAllowedTools = new Set(activeSkill.tools as string[]);
+    finalTools = modeTools.filter(t => skillAllowedTools.has(t.name));
+  }
+
+  const availableTools = supportsToolCalling(currentModel) ? finalTools : [];
+
+  log.debug("Tools available for current mode", {
+    mode: permissionMode,
+    activeSkill: activeSkill?.name || null,
+    toolCount: availableTools.length,
+    tools: availableTools.map(t => t.name),
+  });
 
   // 准备消息列表：如果没有系统消息，添加系统提示
   let messagesWithSystem = [...state.messages];
@@ -406,8 +486,9 @@ const toolConfirmationNode = async (state: typeof MessagesAnnotation.State) => {
   };
 };
 
-// 创建工具节点
-const toolNode = new ToolNode(tools);
+// 创建工具节点 - 使用所有工具，因为权限检查在 agent 节点处理
+// 注意：Plan mode 的工具过滤在 agentNode 中完成，toolNode 只执行被调用的工具
+const toolNode = new ToolNode(allTools);
 
 // 总结节点 - 当消息历史过长时使用 LLM 生成总结
 // 按照 LangGraph 官方推荐：使用 RemoveMessage 删除旧消息，保留摘要
@@ -421,6 +502,10 @@ const summarizeNode = async (
 
   log.nodeStart("summarize", state);
   log.info("Context limit approaching, generating summary...");
+
+  // Emit compacting event to update UI
+  const tokenCount = countMessageTokens(state.messages);
+  emitCompacting(tokenCount);
 
   // 分离系统消息和其他消息
   const systemMessages = state.messages.filter(m => m instanceof SystemMessage);
@@ -525,6 +610,7 @@ const shouldContinue = (
   // 使用 AIMessage.isInstance 来检查，它同时支持 AIMessage 和 AIMessageChunk
   // 参考: https://js.langchain.com/docs/how_to/tool_calling/
   const toolCalls = AIMessage.isInstance(lastMessage) ? lastMessage.tool_calls : undefined;
+  const invalidToolCalls = AIMessage.isInstance(lastMessage) ? (lastMessage as any).invalid_tool_calls : undefined;
 
   const permissionMode = getPermissionMode();
 
@@ -533,9 +619,26 @@ const shouldContinue = (
     isAIMessage: AIMessage.isInstance(lastMessage),
     hasToolCalls: !!(toolCalls && toolCalls.length > 0),
     toolCallsCount: toolCalls?.length || 0,
+    invalidToolCallsCount: invalidToolCalls?.length || 0,
     safeMode: isSafeModeEnabled(),
     permissionMode,
   });
+
+  // 检查是否有无效的工具调用（格式错误的参数）
+  // 如果有无效调用，停止执行并报告错误
+  if (invalidToolCalls && invalidToolCalls.length > 0) {
+    log.error("Invalid tool calls detected, stopping execution", {
+      count: invalidToolCalls.length,
+      invalidCalls: invalidToolCalls.map((tc: any) => ({
+        name: tc.name,
+        error: tc.error,
+      })),
+    });
+    // 发送错误事件给 UI
+    emitError(`LLM returned malformed tool calls: ${invalidToolCalls.map((tc: any) => `${tc.name}: ${tc.error}`).join(", ")}`);
+    log.conditionalEdge("agent", "shouldContinue", "END (invalid tool calls)");
+    return END;
+  }
 
   if (toolCalls && toolCalls.length > 0) {
     // 检查是否需要工具确认
@@ -680,6 +783,21 @@ function handleStreamUpdate(nodeName: string, update: any): void {
   if (nodeName === "agent" && update.messages) {
     const lastMsg = update.messages[update.messages.length - 1];
     const msgToolCalls = AIMessage.isInstance(lastMsg) ? lastMsg.tool_calls : undefined;
+
+    // First, emit any text content from the AI message
+    // This handles cases where AI sends text before/after tool calls
+    if (AIMessage.isInstance(lastMsg)) {
+      const content = typeof lastMsg.content === "string" ? lastMsg.content : extractTextContent(lastMsg.content);
+      if (content && content.trim()) {
+        log.debug("Agent response content", {
+          contentLength: content.length,
+          hasToolCalls: !!(msgToolCalls && msgToolCalls.length > 0),
+        });
+        emitResponse(content);
+      }
+    }
+
+    // Then, emit tool use events if there are tool calls
     if (msgToolCalls && msgToolCalls.length > 0) {
       log.info("Agent requesting tool calls", {
         toolCount: msgToolCalls.length,
@@ -697,15 +815,6 @@ function handleStreamUpdate(nodeName: string, update: any): void {
         const toolCallId = tc.id || `tool_${Date.now()}`;
         setCurrentToolCallId(tc.name, toolCallId);
         emitToolUse(tc.name, tc.args as Record<string, unknown>, toolCallId);
-      }
-    } else if (AIMessage.isInstance(lastMsg)) {
-      log.debug("Agent response (no tool calls)", {
-        contentLength: typeof lastMsg.content === "string" ? lastMsg.content.length : 0,
-      });
-      // Emit response event
-      const content = typeof lastMsg.content === "string" ? lastMsg.content : extractTextContent(lastMsg.content);
-      if (content) {
-        emitResponse(content);
       }
     }
   } else if (nodeName === "tools" && update.messages) {
@@ -997,6 +1106,31 @@ export async function* getStateHistory() {
 export function clearHistory(): void {
   newThread();
   log.info("Conversation history cleared, new thread created");
+}
+
+// 恢复对话历史（用于 session resume）
+export async function restoreHistory(messages: BaseMessage[]): Promise<void> {
+  if (messages.length === 0) {
+    log.debug("No messages to restore");
+    return;
+  }
+
+  try {
+    // 使用 updateState 将消息注入到当前 thread
+    await graph.updateState(
+      getRunConfig(),
+      { messages },
+      "agent"
+    );
+
+    log.info("History restored", {
+      threadId: currentThreadId,
+      messageCount: messages.length,
+    });
+  } catch (error: any) {
+    log.error("Failed to restore history", { error: error.message });
+    throw error;
+  }
 }
 
 // 获取对话历史

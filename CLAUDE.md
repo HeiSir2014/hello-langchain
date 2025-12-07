@@ -42,9 +42,15 @@ src/
 │   ├── permissions.ts      # Permission system
 │   ├── agent/
 │   │   ├── index.ts        # LangGraph StateGraph (agent, tools, confirm, summarize nodes)
+│   │   ├── initAgent.ts    # Init sub-agent for CLAUDE.md generation (LangGraph subgraph)
+│   │   ├── planAgent.ts    # Plan sub-agent for research and planning (LangGraph subgraph)
 │   │   ├── models.ts       # Unified chat model factory for all providers
 │   │   ├── memory.ts       # Token counting, message trimming, summarization
 │   │   └── events.ts       # AgentEventEmitter for UI communication
+│   ├── skills/
+│   │   ├── index.ts        # Skill system exports
+│   │   ├── types.ts        # Skill type definitions
+│   │   └── loader.ts       # Skill loader from markdown files
 │   ├── context/
 │   │   └── index.ts        # Context injection (CLAUDE.md, todo list)
 │   ├── services/
@@ -52,6 +58,8 @@ src/
 │   │   ├── openai.ts       # OpenAI API service
 │   │   ├── anthropic.ts    # Anthropic API service
 │   │   ├── openrouter.ts   # OpenRouter API service
+│   │   ├── codebase.ts     # Codebase analysis service (directory structure, git, code style)
+│   │   ├── projectConfig.ts # Project-level configuration and onboarding state
 │   │   └── reminder.ts     # System reminder service (task/security/performance)
 │   ├── utils/
 │   │   ├── PersistentShell.ts  # Persistent shell session management
@@ -63,7 +71,8 @@ src/
 │       ├── file.ts         # Read, Write, Edit, Glob, Grep, LS tools
 │       ├── todo.ts         # TodoWrite tool for task management
 │       ├── web.ts          # WebSearch, WebFetch tools
-│       └── location.ts     # Location tool (IP geolocation)
+│       ├── location.ts     # Location tool (IP geolocation)
+│       └── plan.ts         # ExitPlanMode, SavePlan, ReadPlan tools
 └── ui/
     ├── app.tsx             # Root component with ThemeProvider
     ├── screens/
@@ -95,8 +104,11 @@ src/
     │       ├── FileWritePermissionRequest.tsx
     │       ├── FilesystemPermissionRequest.tsx
     │       └── FallbackPermissionRequest.tsx
-    ├── commands/           # Slash commands
-    │   ├── index.ts        # Command registry and types
+    ├── commands/           # Slash commands (supports local, local-jsx, prompt, agent types)
+    │   ├── index.ts        # Command registry and types (LocalCommand, PromptCommand, AgentCommand)
+    │   ├── init.ts         # /init - Analyze codebase and generate CLAUDE.md (AgentCommand)
+    │   ├── plan.ts         # /plan - Enter plan mode (read-only research)
+    │   ├── exitPlan.ts     # /exit-plan - Exit plan mode
     │   ├── clear.ts        # /clear - Clear conversation
     │   ├── help.tsx        # /help - Show help
     │   ├── model.tsx       # /model - Switch model
@@ -116,9 +128,9 @@ src/
         └── messages.ts     # Message type definitions
 ```
 
-### Core Flow
+### Core Flow (Main Agent)
 
-```
+```text
 User Input → REPL → multiTurnChat() → LangGraph StateGraph
                                             ↓
                           Agent Node → shouldContinue?
@@ -139,6 +151,26 @@ User Input → REPL → multiTurnChat() → LangGraph StateGraph
                   ↓
                 agent
 ```
+
+### LangGraph Sub-Agents (Best Practices)
+
+The project uses LangGraph subgraphs for specialized tasks. Example: **Init Agent** (`src/core/agent/initAgent.ts`):
+
+```text
+START → analyze → generate → shouldExecuteTools?
+                                 ↓           ↓
+                          executeTools    finalize → END
+                                 ↓
+                          afterToolExecution?
+                                 ↓        ↓
+                            generate   finalize
+```
+
+**Key patterns:**
+- **State with Annotation**: Use `Annotation.Root()` for type-safe state management
+- **Specialized tools**: Sub-agents have their own tool sets (e.g., `WriteClaudeMd`, `ReadClaudeMd`)
+- **Conditional edges**: Route based on state (`shouldExecuteTools`, `afterToolExecution`)
+- **Event emission**: Communicate with UI via shared event system
 
 ### Event-Driven UI Communication
 
@@ -228,6 +260,35 @@ const prefixTools = ["npm", "yarn", "bun", "git", "docker", ...];
 - **Interrupt support**: AbortSignal cancellation
 - **Streaming output**: Real-time output callbacks
 
+### Permission Modes and Plan Mode
+
+The system supports four permission modes, cycled with **Shift+Tab**:
+
+| Mode | Icon | Description | Allowed Tools |
+|------|------|-------------|---------------|
+| `default` | ⏵ | Ask for confirmation | All |
+| `acceptEdits` | ⏵⏵ | Auto-approve edits | All |
+| `plan` | 📝 | Research/planning only | Read-only tools only |
+| `bypassPermissions` | ⏵⏵⏵ | No confirmations | All |
+
+**Plan Mode** (`src/core/agent/planAgent.ts`):
+
+- Enter with `/plan` command or Shift+Tab cycling
+- **Exploration tools**: `Read`, `Glob`, `Grep`, `LS`, `WebSearch`, `WebFetch`
+- **Planning tools**: `SavePlan`, `ReadPlan`, `TodoWrite` (can write plans, not code)
+- **Control**: `ExitPlanMode` to exit
+- Exit with `/exit-plan` or `ExitPlanMode` tool
+
+### Skill System
+
+Skills are specialized agent configurations (`src/core/skills/`):
+
+- **Built-in skills**: `general-purpose`, `code-writer`, `researcher`, `planner`
+- **User skills**: `~/.yterm/skills/*.md`
+- **Project skills**: `.yterm/skills/*.md` (highest priority)
+
+Skills define tool restrictions, system prompts, and model overrides via markdown frontmatter.
+
 ### System Reminder Service
 
 Context-aware hint injection (`src/core/services/reminder.ts`):
@@ -285,6 +346,9 @@ IP-based geolocation (`src/core/tools/location.ts`):
 | `/clear` | `/c` | Clear conversation history |
 | `/model` | `/m` | Show/switch model |
 | `/compact` | - | Compress conversation history |
+| `/init` | `/i` | Analyze codebase and generate CLAUDE.md |
+| `/plan` | `/p` | Enter plan mode (read-only research) |
+| `/exit-plan` | `/ep` | Exit plan mode |
 
 ## Environment Variables
 
@@ -361,10 +425,18 @@ export const MyTool = tool(
 
 ### Adding a New Slash Command
 
+**Command Types:**
+- `local`: Simple command returning a string result
+- `local-jsx`: Command rendering a React component
+- `prompt`: Command that generates a prompt for the main agent
+- `agent`: Command that runs a specialized LangGraph sub-agent
+
 1. Create command in `src/ui/commands/`:
+
 ```typescript
 import { Command } from './index.js';
 
+// Local command example
 const myCommand: Command = {
   name: 'mycommand',
   description: 'Command description',
@@ -379,10 +451,76 @@ const myCommand: Command = {
   },
 };
 
+// Agent command example (uses LangGraph sub-agent)
+const myAgentCommand: Command = {
+  type: 'agent',
+  name: 'myagent',
+  description: 'Run specialized agent',
+  isEnabled: true,
+  isHidden: false,
+  progressMessage: 'running agent...',
+  async runAgent(args, context) {
+    const { runMyAgent } = await import('../../core/agent/myAgent.js');
+    return await runMyAgent(args);
+  },
+  userFacingName: () => 'myagent',
+};
+
 export default myCommand;
 ```
 
 2. Import and add to `COMMANDS` array in `src/ui/commands/index.ts`
+
+### Adding a New LangGraph Sub-Agent
+
+For specialized tasks requiring custom graphs (like `/init`):
+
+1. Create agent in `src/core/agent/myAgent.ts`:
+
+```typescript
+import { StateGraph, Annotation, START, END } from "@langchain/langgraph";
+import { ToolNode } from "@langchain/langgraph/prebuilt";
+import { tool } from "@langchain/core/tools";
+import { z } from "zod";
+
+// 1. Define state with Annotation
+const MyAgentState = Annotation.Root({
+  input: Annotation<string>({ reducer: (_, y) => y }),
+  result: Annotation<string | null>({ reducer: (_, y) => y, default: () => null }),
+  messages: Annotation<BaseMessage[]>({ reducer: (x, y) => [...x, ...y], default: () => [] }),
+  status: Annotation<"pending" | "completed" | "error">({ reducer: (_, y) => y, default: () => "pending" }),
+});
+
+// 2. Define specialized tools
+const myTool = tool(
+  async ({ param }: { param: string }) => { /* ... */ },
+  { name: "MyTool", description: "...", schema: z.object({ param: z.string() }) }
+);
+
+// 3. Create nodes
+async function processNode(state: typeof MyAgentState.State) {
+  // Use callChatModel for LLM calls
+  // Emit events via emitThinking, emitToolUse, etc.
+  return { /* state updates */ };
+}
+
+// 4. Build graph with conditional edges
+const graph = new StateGraph(MyAgentState)
+  .addNode("process", processNode)
+  .addNode("tools", new ToolNode([myTool]))
+  .addEdge(START, "process")
+  .addConditionalEdges("process", shouldExecuteTools)
+  .addEdge("tools", "process")
+  .compile();
+
+// 5. Export runner function
+export async function runMyAgent(input: string) {
+  const result = await graph.invoke({ input });
+  return { success: result.status === "completed", message: result.result || "" };
+}
+```
+
+2. Create command in `src/ui/commands/` using `type: 'agent'`
 
 ### Adding a New Model Provider
 

@@ -17,7 +17,7 @@ const model: Command = {
   isEnabled: true,
   isHidden: false,
   aliases: ['m'],
-  async call(onDone, context) {
+  async call(_args, onDone, context) {
     const handleSelect = async (modelName: string) => {
       // Get the model config to determine its provider
       const modelConfig = getModelConfig(modelName);

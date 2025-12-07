@@ -28,6 +28,7 @@ export type AgentEventType =
   | { type: 'response'; content: string }
   | { type: 'error'; message: string }
   | { type: 'confirm_required'; tools: ToolConfirmation[] }
+  | { type: 'compacting'; tokenCount?: number }
   | { type: 'auto_compact'; messagesBefore: number; messagesAfter: number; summary?: string }
   | { type: 'done'; interrupted?: boolean };
 
@@ -71,6 +72,9 @@ export const emitError = (message: string) =>
 
 export const emitConfirmRequired = (tools: ToolConfirmation[]) =>
   agentEvents.emit('agent', { type: 'confirm_required', tools });
+
+export const emitCompacting = (tokenCount?: number) =>
+  agentEvents.emit('agent', { type: 'compacting', tokenCount });
 
 export const emitAutoCompact = (messagesBefore: number, messagesAfter: number, summary?: string) =>
   agentEvents.emit('agent', { type: 'auto_compact', messagesBefore, messagesAfter, summary });

@@ -5,7 +5,11 @@ import { generateMessageId } from '../types/messages.js';
 
 export function useAgentEvents() {
   const [messages, setMessages] = useState<MessageItem[]>([]);
+  // Callback to be called when done event fires (for session saving)
+  const onDoneCallback = useRef<((interrupted: boolean) => void) | null>(null);
   const [isLoading, setIsLoading] = useState(false);
+  const [isCompacting, setIsCompacting] = useState(false);
+  const [compactingTokens, setCompactingTokens] = useState<number | undefined>(undefined);
   const [streamingContent, setStreamingContent] = useState('');
   const [toolConfirm, setToolConfirm] = useState<ToolConfirmation[] | null>(null);
   // Track tool IDs that have received results (used to avoid race conditions)
@@ -85,6 +89,16 @@ export function useAgentEvents() {
           setToolConfirm(event.tools);
           break;
 
+        case 'compacting':
+          setIsCompacting(true);
+          setCompactingTokens(event.tokenCount);
+          break;
+
+        case 'auto_compact':
+          setIsCompacting(false);
+          setCompactingTokens(undefined);
+          break;
+
         case 'done':
           setIsLoading(false);
           setStreamingContent('');
@@ -108,6 +122,12 @@ export function useAgentEvents() {
           }
           // Clear completed tool IDs for next request
           completedToolIds.current.clear();
+          // Call the done callback (for session saving)
+          // Use setTimeout to ensure React state has been updated
+          // before we save (response event may have just added a message)
+          setTimeout(() => {
+            onDoneCallback.current?.(event.interrupted || false);
+          }, 50);
           break;
       }
     };
@@ -144,6 +164,16 @@ export function useAgentEvents() {
     setMessages([]);
   }, []);
 
+  // Set the onDone callback (for session saving)
+  const setOnDone = useCallback((callback: ((interrupted: boolean) => void) | null) => {
+    onDoneCallback.current = callback;
+  }, []);
+
+  // Restore messages (for session resume)
+  const restoreMessages = useCallback((newMessages: MessageItem[]) => {
+    setMessages(newMessages);
+  }, []);
+
   return {
     messages,
     addUserMessage,
@@ -151,10 +181,14 @@ export function useAgentEvents() {
     addBashInput,
     addBashOutput,
     clearMessages,
+    restoreMessages,
     isLoading,
     setIsLoading,
+    isCompacting,
+    compactingTokens,
     streamingContent,
     toolConfirm,
     setToolConfirm,
+    setOnDone,
   };
 }
