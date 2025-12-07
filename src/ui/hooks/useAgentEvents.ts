@@ -14,6 +14,9 @@ export function useAgentEvents() {
   const [toolConfirm, setToolConfirm] = useState<ToolConfirmation[] | null>(null);
   // Track tool IDs that have received results (used to avoid race conditions)
   const completedToolIds = useRef<Set<string>>(new Set());
+  const [tokenUsage, setTokenUsage] = useState<{ tokenCount: number; contextLimit: number; percentUsed: number } | null>(null);
+  // Track when auto-compact completes (to trigger screen clear in REPL)
+  const [autoCompactCompleted, setAutoCompactCompleted] = useState(false);
 
   useEffect(() => {
     const handler = (event: AgentEventType) => {
@@ -94,9 +97,32 @@ export function useAgentEvents() {
           setCompactingTokens(event.tokenCount);
           break;
 
+        case 'token_usage':
+          setTokenUsage({
+            tokenCount: event.tokenCount,
+            contextLimit: event.contextLimit,
+            percentUsed: event.percentUsed,
+          });
+          break;
+
         case 'auto_compact':
           setIsCompacting(false);
           setCompactingTokens(undefined);
+          // 清空所有 UI messages，显示压缩通知和总结
+          setMessages([
+            {
+              type: 'system',
+              content: `[Auto-compact] ${event.messagesBefore} messages compressed into summary.`,
+              id: generateMessageId(),
+            },
+            {
+              type: 'assistant',
+              content: event.summary || 'Conversation history summarized.',
+              id: generateMessageId(),
+            },
+          ]);
+          // Signal that auto-compact completed (for screen clearing)
+          setAutoCompactCompleted(true);
           break;
 
         case 'done':
@@ -174,6 +200,11 @@ export function useAgentEvents() {
     setMessages(newMessages);
   }, []);
 
+  // Reset auto-compact flag
+  const resetAutoCompactFlag = useCallback(() => {
+    setAutoCompactCompleted(false);
+  }, []);
+
   return {
     messages,
     addUserMessage,
@@ -190,5 +221,8 @@ export function useAgentEvents() {
     toolConfirm,
     setToolConfirm,
     setOnDone,
+    tokenUsage,
+    autoCompactCompleted,
+    resetAutoCompactFlag,
   };
 }

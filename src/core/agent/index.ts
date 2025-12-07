@@ -1,6 +1,7 @@
 import {
   StateGraph,
   MessagesAnnotation,
+  Annotation,
   START,
   END,
   MemorySaver,
@@ -37,13 +38,9 @@ import { callChatModel, simpleChatWithModel } from "./models.js";
 import { getDefaultModel, getModelConfig, supportsToolCalling } from "../config.js";
 import { log } from "../../logger.js";
 import {
-  shouldTrimMessages,
-  shouldAutoCompact,
-  buildSummaryPrompt,
   buildComprehensiveSummaryPrompt,
   countMessageTokens,
   getContextUsage,
-  trimMessages,
 } from "./memory.js";
 import {
   generateContextInjection,
@@ -61,6 +58,7 @@ import {
   emitConfirmRequired,
   emitCompacting,
   emitAutoCompact,
+  emitTokenUsage,
   emitDone,
   createToolAbortController,
   abortToolExecution,
@@ -69,6 +67,36 @@ import {
   getCurrentToolCallId,
   clearToolCallIds,
 } from "./events.js";
+
+// ============ State 定义 ============
+
+// UsageMetadata 类型定义（从 LangChain）
+interface UsageMetadata {
+  input_tokens: number;
+  output_tokens: number;
+  total_tokens: number;
+  input_token_details?: {
+    cache_read?: number;
+    cache_creation?: number;
+  };
+  output_token_details?: {
+    reasoning?: number;
+  };
+}
+
+// 扩展 MessagesAnnotation 添加自定义字段
+const AgentState = Annotation.Root({
+  ...MessagesAnnotation.spec,
+  skipNextCheck: Annotation<boolean>({
+    reducer: (_, y) => y ?? false,
+    default: () => false,
+  }),
+  // 保存上一次 LLM 响应的 usage_metadata（用于准确的 token 跟踪）
+  lastUsageMetadata: Annotation<UsageMetadata | null>({
+    reducer: (_, y) => y ?? null,
+    default: () => null,
+  }),
+});
 
 // ============ 辅助函数 ============
 
@@ -279,7 +307,7 @@ export function newThread(): string {
 
 // Agent 节点 - 调用 LLM
 const agentNode = async (
-  state: typeof MessagesAnnotation.State,
+  state: typeof AgentState.State,
   _config?: RunnableConfig
 ) => {
   const startTime = Date.now();
@@ -342,16 +370,79 @@ const agentNode = async (
   // 使用统一的聊天模型接口
   const response = await callChatModel(messagesWithSystem, availableTools, currentModel, true);
 
-  log.nodeEnd("agent", { messages: [response] }, Date.now() - startTime);
+  // 使用 LLM 返回的实际 token usage（最准确）
+  // 参考: https://js.langchain.com/docs/how_to/chat_token_usage_tracking/
+  // 参考: https://python.langchain.com/v0.2/docs/how_to/response_metadata/
 
-  return { messages: [response] };
+  // 1. 优先使用 usage_metadata（标准字段）
+  let usageMetadata = (response as any).usage_metadata as UsageMetadata | undefined;
+
+  // 2. Fallback: 从 response_metadata.usage 构建（Anthropic 特有）
+  if (!usageMetadata || !usageMetadata.total_tokens) {
+    const responseMetadata = (response as any).response_metadata;
+    if (responseMetadata?.usage) {
+      const { input_tokens, output_tokens } = responseMetadata.usage;
+      usageMetadata = {
+        input_tokens: input_tokens || 0,
+        output_tokens: output_tokens || 0,
+        total_tokens: (input_tokens || 0) + (output_tokens || 0),
+      };
+      log.debug("Using response_metadata.usage (Anthropic fallback)", {
+        input_tokens: usageMetadata.input_tokens,
+        output_tokens: usageMetadata.output_tokens,
+        total_tokens: usageMetadata.total_tokens,
+      });
+    }
+  }
+
+  if (usageMetadata && usageMetadata.total_tokens > 0) {
+    const { input_tokens = 0, output_tokens = 0, total_tokens = 0 } = usageMetadata;
+    const modelConfig = getModelConfig(currentModel);
+    const contextLimit = modelConfig?.contextWindow || 128000;
+    const percentUsed = Math.round((total_tokens / contextLimit) * 100);
+
+    log.debug("LLM usage_metadata (actual)", {
+      input_tokens,
+      output_tokens,
+      total_tokens,
+      contextLimit,
+      percentUsed: `${percentUsed}%`,
+      ...(usageMetadata.input_token_details && {
+        cache_read: usageMetadata.input_token_details.cache_read,
+        cache_creation: usageMetadata.input_token_details.cache_creation,
+      }),
+      ...(usageMetadata.output_token_details && {
+        reasoning: usageMetadata.output_token_details.reasoning,
+      }),
+    });
+
+    emitTokenUsage(total_tokens, contextLimit, percentUsed);
+
+    log.nodeEnd("agent", { messages: [response] }, Date.now() - startTime);
+
+    // 返回消息 + 保存 usage_metadata 到 state
+    return {
+      messages: [response],
+      lastUsageMetadata: usageMetadata,
+    };
+  } else {
+    // Fallback: 估算 token 使用情况（某些模型可能不返回 usage_metadata）
+    log.debug("No usage_metadata from LLM, falling back to estimation");
+    const updatedMessages = [...state.messages, response];
+    const contextUsage = getContextUsage(updatedMessages, modelName);
+    emitTokenUsage(contextUsage.tokenCount, contextUsage.contextLimit, contextUsage.percentUsed);
+
+    log.nodeEnd("agent", { messages: [response] }, Date.now() - startTime);
+
+    return { messages: [response] };
+  }
 };
 
 // 追踪是否已经发射过确认事件（避免 resume 后重复发射）
 let confirmationEmitted = false;
 
 // 工具确认节点 - 在执行敏感工具前请求确认
-const toolConfirmationNode = async (state: typeof MessagesAnnotation.State) => {
+const toolConfirmationNode = async (state: typeof AgentState.State) => {
   log.nodeStart("confirm_tools", state);
   const startTime = Date.now();
 
@@ -442,13 +533,9 @@ const toolConfirmationNode = async (state: typeof MessagesAnnotation.State) => {
       log.nodeEnd("confirm_tools", { approved: true }, Date.now() - startTime);
       return { messages: [] };
     }
-  } else if (response === "y" || response === "yes" || response === true) {
-    // 向后兼容简单的 yes/no 响应
-    log.info("Tool execution approved (simple)", { tools: toolsNeedingPermission.map(tc => tc.name) });
-    log.nodeEnd("confirm_tools", { approved: true }, Date.now() - startTime);
-    return { messages: [] };
   }
 
+  // 工具被拒绝
   log.info("Tool execution rejected", {
     tools: toolsNeedingPermission.map(tc => tc.name),
     response,
@@ -490,10 +577,8 @@ const toolConfirmationNode = async (state: typeof MessagesAnnotation.State) => {
 // 注意：Plan mode 的工具过滤在 agentNode 中完成，toolNode 只执行被调用的工具
 const toolNode = new ToolNode(allTools);
 
-// 总结节点 - 当消息历史过长时使用 LLM 生成总结
-// 按照 LangGraph 官方推荐：使用 RemoveMessage 删除旧消息，保留摘要
 const summarizeNode = async (
-  state: typeof MessagesAnnotation.State,
+  state: typeof AgentState.State,
   _config?: RunnableConfig
 ) => {
   const startTime = Date.now();
@@ -503,98 +588,81 @@ const summarizeNode = async (
   log.nodeStart("summarize", state);
   log.info("Context limit approaching, generating summary...");
 
-  // Emit compacting event to update UI
   const tokenCount = countMessageTokens(state.messages);
   emitCompacting(tokenCount);
 
-  // 分离系统消息和其他消息
-  const systemMessages = state.messages.filter(m => m instanceof SystemMessage);
   const nonSystemMessages = state.messages.filter(m => !(m instanceof SystemMessage));
 
-  // 保留最近的消息（确保工具调用完整性）
-  const keepCount = 10;
-
-  // 找到安全的分割点 - 确保不会打断工具调用对
-  let splitIndex = Math.max(0, nonSystemMessages.length - keepCount);
-
-  // 向前调整分割点，确保不在 AIMessage(tool_calls) 之后立即切断
-  while (splitIndex > 0) {
-    const msg = nonSystemMessages[splitIndex - 1];
-    // 如果前一条是带 tool_calls 的 AIMessage，需要保留对应的 ToolMessage
-    if (AIMessage.isInstance(msg) && msg.tool_calls && msg.tool_calls.length > 0) {
-      splitIndex--;
-    } else {
-      break;
-    }
+  if (nonSystemMessages.length < 3) {
+    log.debug("Not enough messages to summarize (less than 3)");
+    log.nodeEnd("summarize", { skipped: true }, Date.now() - startTime);
+    return { messages: [], skipNextCheck: true };
   }
 
-  const messagesToSummarize = nonSystemMessages.slice(0, splitIndex);
-  const recentMessages = nonSystemMessages.slice(splitIndex);
-
-  if (messagesToSummarize.length === 0) {
-    log.debug("No messages to summarize");
-    return { messages: [] };
-  }
-
-  // 构建总结 prompt
-  const summaryPrompt = buildSummaryPrompt(messagesToSummarize);
-
-  log.info("Generating summary with LLM", {
-    messagesToSummarize: messagesToSummarize.length,
-    recentMessages: recentMessages.length,
+  // 策略：在 LangGraph 流程中生成总结
+  // 添加总结请求，使用 callChatModel（和 agent 节点相同的函数）
+  log.info("Generating comprehensive summary with LLM", {
+    messagesToSummarize: nonSystemMessages.length,
     model: modelName,
   });
 
-  try {
-    // 使用统一的聊天模型接口（不带工具）
-    const summaryContent = await simpleChatWithModel(
-      [new HumanMessage(summaryPrompt)],
-      currentModel
-    );
+  const summaryPrompt = buildComprehensiveSummaryPrompt(nonSystemMessages);
+  const summaryRequest = new HumanMessage(summaryPrompt);
 
-    // 创建摘要消息（使用 HumanMessage 作为上下文提示，避免与 AI 响应混淆）
-    const summaryMessage = new HumanMessage({
-      content: `[Previous Conversation Summary]\n${summaryContent}\n[End of Summary - The conversation continues below]`,
+  // 构建消息列表：所有历史 + 总结请求
+  const messagesForSummary = [...state.messages, summaryRequest];
+
+  try {
+    // 使用 callChatModel（和 agent 节点相同），但不提供工具
+    emitThinking(modelName);
+    const response = await callChatModel(messagesForSummary, [], currentModel, true);
+
+    const summaryContent = typeof response.content === "string"
+      ? response.content
+      : extractTextContent(response.content);
+
+    // 1. 压缩通知（用户消息）
+    const compactNotice = new HumanMessage({
+      content: "Context automatically compressed due to token limit. Essential information preserved.",
+      id: `compact_notice_${Date.now()}`,
+    });
+
+    // 2. 总结内容（AI 响应）
+    const summaryResponse = new AIMessage({
+      content: summaryContent,
       id: `summary_${Date.now()}`,
     });
 
-    // 使用 RemoveMessage 删除被总结的旧消息
-    // LangGraph 的 add_messages reducer 会处理这些删除操作
-    const removeMessages = messagesToSummarize
-      .filter(m => m.id) // 只删除有 id 的消息
+    // 3. 删除所有历史消息
+    const removeMessages = nonSystemMessages
+      .filter(m => m.id)
       .map(m => new RemoveMessage({ id: m.id! }));
 
-    log.info("Summary generated", {
+    log.info("Summary generated, all conversation history replaced", {
       summaryLength: summaryContent.length,
       removedMessages: removeMessages.length,
-      keptMessages: recentMessages.length,
       durationMs: Date.now() - startTime,
     });
 
-    log.info(`Summarized ${messagesToSummarize.length} messages`);
-
-    // 发出 auto-compact 事件
     emitAutoCompact(
       state.messages.length,
-      recentMessages.length + 1, // +1 for summary message
-      summaryContent.slice(0, 500) // 摘要预览
+      2, // compactNotice + summaryResponse
+      summaryContent
     );
 
     log.nodeEnd("summarize", {
-      summaryMessage: true,
+      summaryGenerated: true,
       removedCount: removeMessages.length
     }, Date.now() - startTime);
 
-    // 返回：先添加摘要消息，再发送删除指令
-    // LangGraph 的 MessagesAnnotation 会按顺序处理这些操作
+    // 返回：删除所有旧消息 + 添加压缩通知和总结
     return {
-      messages: [summaryMessage, ...removeMessages]
+      messages: [...removeMessages, compactNotice, summaryResponse]
     };
   } catch (error: any) {
     log.error("Failed to generate summary", { error: error.message });
     log.nodeEnd("summarize", { error: error.message }, Date.now() - startTime);
-    log.error("Summary generation failed, continuing without summarization");
-    return { messages: [] };
+    return { messages: [], skipNextCheck: true };
   }
 };
 
@@ -602,7 +670,7 @@ const summarizeNode = async (
 
 // 判断是否需要调用工具
 const shouldContinue = (
-  state: typeof MessagesAnnotation.State
+  state: typeof AgentState.State
 ): "tools" | "confirm_tools" | typeof END => {
   const { messages } = state;
   const lastMessage = messages[messages.length - 1];
@@ -686,7 +754,7 @@ const shouldContinue = (
 
 // 确认后的路由
 const afterConfirmation = (
-  state: typeof MessagesAnnotation.State
+  state: typeof AgentState.State
 ): "tools" | "agent" => {
   const { messages } = state;
   const lastMessage = messages[messages.length - 1];
@@ -705,34 +773,79 @@ const afterConfirmation = (
 
 // 检查消息点 - 在进入 agent 之前检查是否需要总结或 auto-compact
 const checkMessages = (
-  state: typeof MessagesAnnotation.State
+  state: typeof AgentState.State
 ): "summarize" | "agent" => {
-  const { messages } = state;
+  const { messages, skipNextCheck, lastUsageMetadata } = state;
+
+  // 如果上次 summarize 发现没有可压缩内容，跳过本次检查
+  if (skipNextCheck) {
+    log.conditionalEdge("check", "checkMessages", "agent (skip check)");
+    return "agent";
+  }
+
   const modelConfig = getModelConfig(currentModel);
   const modelName = modelConfig?.model || currentModel;
+  const contextLimit = modelConfig?.contextWindow || 128000;
 
-  // 获取上下文使用情况
-  const contextUsage = getContextUsage(messages, modelName);
+  let totalTokens = 0;
+  let estimationMethod = "";
 
-  // 检查是否需要 auto-compact（92% 阈值）
-  if (contextUsage.isAboveAutoCompactThreshold) {
+  // 策略：优先使用 LLM 返回的 usage_metadata + 估算新增的 ToolMessage
+  if (lastUsageMetadata) {
+    // 1. 从上一次 Agent 响应获取基准 token 数
+    const baseTokens = lastUsageMetadata.total_tokens;
+
+    // 2. 找到上一次 Agent 响应后新增的消息（主要是 ToolMessage）
+    // 找到最后一条 AIMessage 的索引
+    let lastAIMessageIndex = -1;
+    for (let i = messages.length - 1; i >= 0; i--) {
+      if (AIMessage.isInstance(messages[i])) {
+        lastAIMessageIndex = i;
+        break;
+      }
+    }
+
+    const newMessages = lastAIMessageIndex >= 0
+      ? messages.slice(lastAIMessageIndex + 1)
+      : [];
+
+    // 3. 估算新增消息的 token
+    const newMessagesTokens = countMessageTokens(newMessages);
+
+    // 4. 总 token = 基准 + 新增
+    totalTokens = baseTokens + newMessagesTokens;
+    estimationMethod = "hybrid (usage_metadata + estimation)";
+
+    log.debug("Token calculation (hybrid)", {
+      baseTokens,
+      newMessagesCount: newMessages.length,
+      newMessagesTokens,
+      totalTokens,
+      contextLimit,
+    });
+  } else {
+    // Fallback: 完全估算（某些模型不返回 usage_metadata）
+    const contextUsage = getContextUsage(messages, modelName);
+    totalTokens = contextUsage.tokenCount;
+    estimationMethod = "full estimation";
+
+    log.debug("Token calculation (fallback)", {
+      totalTokens,
+      contextLimit,
+    });
+  }
+
+  const percentUsed = Math.round((totalTokens / contextLimit) * 100);
+  const isAboveAutoCompactThreshold = percentUsed >= 92;
+
+  if (isAboveAutoCompactThreshold) {
     log.conditionalEdge("check", "checkMessages", "summarize (auto-compact)");
     log.info("Auto-compact triggered: context usage above 92%", {
       messageCount: messages.length,
-      tokens: contextUsage.tokenCount,
-      percentUsed: contextUsage.percentUsed,
-      contextLimit: contextUsage.contextLimit,
-    });
-    return "summarize";
-  }
-
-  // 检查是否需要普通总结（70% 阈值）
-  if (shouldTrimMessages(messages, modelName)) {
-    log.conditionalEdge("check", "checkMessages", "summarize");
-    log.info("Messages exceed trim threshold, routing to summarize", {
-      messageCount: messages.length,
-      tokens: contextUsage.tokenCount,
-      percentUsed: contextUsage.percentUsed,
+      totalTokens,
+      percentUsed,
+      contextLimit,
+      estimationMethod,
     });
     return "summarize";
   }
@@ -743,12 +856,55 @@ const checkMessages = (
 
 // ============ 构建 Graph ============
 
-const graphBuilder = new StateGraph(MessagesAnnotation)
+// Check 节点 - 重置标志并发射 token usage
+const checkNode = (state: typeof AgentState.State) => {
+  const { lastUsageMetadata, messages } = state;
+  const modelConfig = getModelConfig(currentModel);
+  const contextLimit = modelConfig?.contextWindow || 128000;
+
+  // 如果有 usage_metadata，发射更新的 token usage 到 UI
+  if (lastUsageMetadata) {
+    // 计算包含新增 ToolMessage 的总 token 数
+    let lastAIMessageIndex = -1;
+    for (let i = messages.length - 1; i >= 0; i--) {
+      if (AIMessage.isInstance(messages[i])) {
+        lastAIMessageIndex = i;
+        break;
+      }
+    }
+
+    const newMessages = lastAIMessageIndex >= 0 ? messages.slice(lastAIMessageIndex + 1) : [];
+    const newMessagesTokens = countMessageTokens(newMessages);
+    const totalTokens = lastUsageMetadata.total_tokens + newMessagesTokens;
+    const percentUsed = Math.round((totalTokens / contextLimit) * 100);
+
+    // 发射更新的 token usage（包含工具执行后的消息）
+    emitTokenUsage(totalTokens, contextLimit, percentUsed);
+
+    log.debug("Check node: token usage updated", {
+      baseTokens: lastUsageMetadata.total_tokens,
+      newMessagesTokens,
+      totalTokens,
+      percentUsed: `${percentUsed}%`,
+    });
+  }
+
+  return { skipNextCheck: false };
+};
+
+const graphBuilder = new StateGraph(AgentState)
+  .addNode("check", checkNode)
   .addNode("agent", agentNode)
   .addNode("confirm_tools", toolConfirmationNode)
   .addNode("tools", toolNode)
   .addNode("summarize", summarizeNode)
-  .addEdge(START, "agent")
+  // 关键修复:从 START 先进入 check 节点,检查是否需要压缩
+  .addEdge(START, "check")
+  // check 节点根据上下文使用情况决定是否需要先压缩
+  .addConditionalEdges("check", checkMessages, {
+    summarize: "summarize",
+    agent: "agent",
+  })
   .addConditionalEdges("agent", shouldContinue, {
     tools: "tools",
     confirm_tools: "confirm_tools",
@@ -758,11 +914,8 @@ const graphBuilder = new StateGraph(MessagesAnnotation)
     tools: "tools",
     agent: "agent",  // pattern: 拒绝后路由到 agent 继续处理
   })
-  // 工具执行后检查是否需要总结
-  .addConditionalEdges("tools", checkMessages, {
-    summarize: "summarize",
-    agent: "agent",
-  })
+  // 工具执行后回到 check 节点,再次检查是否需要总结
+  .addEdge("tools", "check")
   // 总结后继续执行 agent
   .addEdge("summarize", "agent");
 
@@ -1150,8 +1303,6 @@ export async function getHistory(): Promise<BaseMessage[]> {
   }
 }
 
-// 压缩对话历史（手动触发）
-// 使用 RemoveMessage 来删除旧消息，保持与 summarizeNode 一致
 export async function compactHistory(): Promise<{ before: number; after: number }> {
   const state = await getState();
   const messages: BaseMessage[] = state.values?.messages || [];
@@ -1160,33 +1311,42 @@ export async function compactHistory(): Promise<{ before: number; after: number 
     return { before: 0, after: 0 };
   }
 
-  const trimmedMessages = trimMessages(messages, currentModel);
+  const nonSystemMessages = messages.filter(m => !(m instanceof SystemMessage));
 
-  if (trimmedMessages.length < messages.length) {
-    // 找出需要删除的消息
-    const trimmedIds = new Set(trimmedMessages.map(m => m.id).filter(Boolean));
-    const messagesToRemove = messages.filter(m => m.id && !trimmedIds.has(m.id));
-
-    // 使用 RemoveMessage 来删除旧消息
-    const removeMessages = messagesToRemove.map(m => new RemoveMessage({ id: m.id! }));
-
-    // 更新状态 - 发送删除指令（使用 agent 节点）
-    await graph.updateState(
-      getRunConfig(),
-      { messages: removeMessages },
-      "agent"
-    );
-
-    log.info("History compacted manually using RemoveMessage", {
-      before: messages.length,
-      after: trimmedMessages.length,
-      removed: messagesToRemove.length,
-    });
+  if (nonSystemMessages.length === 0) {
+    return { before: messages.length, after: messages.length };
   }
+
+  const summaryPrompt = buildComprehensiveSummaryPrompt(nonSystemMessages);
+  const summaryContent = await simpleChatWithModel(
+    [new HumanMessage(summaryPrompt)],
+    currentModel
+  );
+
+  const summaryMessage = new HumanMessage({
+    content: `[Previous Conversation Summary]\n${summaryContent}\n[End of Summary - The conversation continues below]`,
+    id: `summary_${Date.now()}`,
+  });
+
+  const removeMessages = nonSystemMessages
+    .filter(m => m.id)
+    .map(m => new RemoveMessage({ id: m.id! }));
+
+  await graph.updateState(
+    getRunConfig(),
+    { messages: [summaryMessage, ...removeMessages] },
+    "agent"
+  );
+
+  log.info("History compacted manually", {
+    before: messages.length,
+    after: 1,
+    removed: removeMessages.length,
+  });
 
   return {
     before: messages.length,
-    after: trimmedMessages.length,
+    after: 1,
   };
 }
 

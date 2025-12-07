@@ -1,7 +1,6 @@
 /**
  * Cursor utility class for text input handling
  *
- * Adapted from Kode-cli's Cursor implementation.
  * Handles text wrapping, cursor positioning, and rendering for terminal input.
  */
 import wrapAnsi from 'wrap-ansi';
@@ -257,7 +256,7 @@ class WrappedLine {
     public readonly startOffset: number,
     public readonly isPrecededByNewline: boolean,
     public readonly endsWithNewline: boolean = false,
-  ) {}
+  ) { }
 
   equals(other: WrappedLine): boolean {
     return this.text === other.text && this.startOffset === other.startOffset;

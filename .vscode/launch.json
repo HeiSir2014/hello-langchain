@@ -2,24 +2,152 @@
   "version": "0.2.0",
   "configurations": [
     {
-      "name": "Debug TypeScript",
       "type": "node",
       "request": "launch",
-      "program": "${workspaceFolder}/src/index.ts",
-      "preLaunchTask": "tsc: build",
-      "outFiles": ["${workspaceFolder}/dist/**/*.js"],
+      "name": "Debug YTerm CLI (No Break)",
+      "runtimeExecutable": "bun",
+      "runtimeArgs": ["--inspect=127.0.0.1:9229", "run", "src/cli.tsx"],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "skipFiles": ["<node_internals>/**", "**/node_modules/**"],
+      "env": {
+        "NODE_ENV": "development"
+      },
       "sourceMaps": true,
-      "console": "integratedTerminal"
+      "smartStep": true,
+      "restart": true,
+      "timeout": 30000,
+      "outFiles": ["${workspaceFolder}/dist/**/*.js", "${workspaceFolder}/src/**/*.tsx", "${workspaceFolder}/src/**/*.ts"]
     },
     {
-      "name": "Debug Current File",
       "type": "node",
       "request": "launch",
-      "program": "${file}",
-      "preLaunchTask": "tsc: build",
-      "outFiles": ["${workspaceFolder}/dist/**/*.js"],
+      "name": "Debug YTerm CLI",
+      "runtimeExecutable": "bun",
+      "runtimeArgs": ["--inspect-brk=127.0.0.1:9229", "run", "src/cli.tsx"],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "skipFiles": ["<node_internals>/**", "**/node_modules/**"],
+      "env": {
+        "NODE_ENV": "development"
+      },
       "sourceMaps": true,
-      "console": "integratedTerminal"
+      "smartStep": true,
+      "restart": true,
+      "timeout": 30000,
+      "outFiles": ["${workspaceFolder}/dist/**/*.js", "${workspaceFolder}/src/**/*.tsx", "${workspaceFolder}/src/**/*.ts"]
+    },
+    {
+      "type": "node",
+      "request": "launch",
+      "name": "Debug with Arguments",
+      "runtimeExecutable": "bun",
+      "runtimeArgs": ["--inspect-brk=127.0.0.1:9229", "run", "src/cli.tsx"],
+      "args": ["-m", "qwen3:0.6b", "hello"],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "skipFiles": ["<node_internals>/**", "**/node_modules/**"],
+      "env": {
+        "NODE_ENV": "development"
+      },
+      "sourceMaps": true,
+      "smartStep": true,
+      "restart": true,
+      "timeout": 30000,
+      "outFiles": ["${workspaceFolder}/dist/**/*.js", "${workspaceFolder}/src/**/*.tsx", "${workspaceFolder}/src/**/*.ts"]
+    },
+    {
+      "type": "node",
+      "request": "launch",
+      "name": "Debug Current Test File",
+      "runtimeExecutable": "bun",
+      "runtimeArgs": ["test", "${file}"],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "skipFiles": ["<node_internals>/**"],
+      "sourceMaps": true
+    },
+    {
+      "type": "node",
+      "request": "launch",
+      "name": "Debug All Tests",
+      "runtimeExecutable": "bun",
+      "runtimeArgs": ["test"],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "skipFiles": ["<node_internals>/**"],
+      "sourceMaps": true
+    },
+    {
+      "type": "node",
+      "request": "launch",
+      "name": "Debug /init Command",
+      "runtimeExecutable": "bun",
+      "runtimeArgs": ["--inspect-brk=127.0.0.1:9229", "run", "src/cli.tsx"],
+      "args": ["/init"],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "skipFiles": ["<node_internals>/**", "**/node_modules/**"],
+      "env": {
+        "NODE_ENV": "development",
+        "LOG_LEVEL": "debug"
+      },
+      "sourceMaps": true,
+      "smartStep": true,
+      "restart": true,
+      "timeout": 30000,
+      "outFiles": ["${workspaceFolder}/dist/**/*.js", "${workspaceFolder}/src/**/*.tsx", "${workspaceFolder}/src/**/*.ts"]
+    },
+    {
+      "type": "node",
+      "request": "launch",
+      "name": "Debug /plan Mode",
+      "runtimeExecutable": "bun",
+      "runtimeArgs": ["--inspect-brk=127.0.0.1:9229", "run", "src/cli.tsx"],
+      "args": ["/plan", "研究项目架构"],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "skipFiles": ["<node_internals>/**", "**/node_modules/**"],
+      "env": {
+        "NODE_ENV": "development",
+        "LOG_LEVEL": "debug"
+      },
+      "sourceMaps": true,
+      "smartStep": true,
+      "restart": true,
+      "timeout": 30000,
+      "outFiles": ["${workspaceFolder}/dist/**/*.js", "${workspaceFolder}/src/**/*.tsx", "${workspaceFolder}/src/**/*.ts"]
+    },
+    {
+      "type": "node",
+      "request": "launch",
+      "name": "Debug Auto-Compact (Small Context)",
+      "runtimeExecutable": "bun",
+      "runtimeArgs": ["--inspect-brk=127.0.0.1:9229", "run", "src/cli.tsx"],
+      "args": ["-m", "qwen3:0.6b", "测试自动压缩"],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "skipFiles": ["<node_internals>/**", "**/node_modules/**"],
+      "env": {
+        "NODE_ENV": "development",
+        "LOG_LEVEL": "debug"
+      },
+      "sourceMaps": true,
+      "smartStep": true,
+      "restart": true,
+      "timeout": 30000,
+      "outFiles": ["${workspaceFolder}/dist/**/*.js", "${workspaceFolder}/src/**/*.tsx", "${workspaceFolder}/src/**/*.ts"]
+    },
+    {
+      "type": "node",
+      "request": "attach",
+      "name": "Attach to Bun Process",
+      "port": 6499,
+      "address": "localhost",
+      "localRoot": "${workspaceFolder}",
+      "remoteRoot": "${workspaceFolder}",
+      "skipFiles": ["<node_internals>/**"],
+      "sourceMaps": true
     }
   ]
 }

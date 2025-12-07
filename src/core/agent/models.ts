@@ -10,11 +10,10 @@ import { ChatAnthropic } from "@langchain/anthropic";
 import { ChatOpenAI } from "@langchain/openai";
 import { ChatOllama } from "@langchain/ollama";
 import { StructuredToolInterface } from "@langchain/core/tools";
-import { BaseMessage, AIMessageChunk } from "@langchain/core/messages";
+import { BaseMessage, AIMessageChunk, SystemMessage } from "@langchain/core/messages";
 import { concat } from "@langchain/core/utils/stream";
 import { getModelConfig, ProviderType, ModelType, ModelConfig } from "../config.js";
 import { log } from "../../logger.js";
-import { autoTrimMessages, countMessageTokens } from "./memory.js";
 import { emitStreaming } from "./events.js";
 
 // ============ Provider 配置 ============
@@ -274,22 +273,18 @@ export async function callChatModel(
   const config = getModelConfig(modelName);
   const resolvedModelName = config?.model || modelName;
 
-  // 自动裁剪消息以适应上下文窗口
-  const originalCount = messages.length;
-  const originalTokens = countMessageTokens(messages);
-  const trimmedMessages = autoTrimMessages(messages, modelName);
+  const trimmedMessages = messages;
 
-  if (trimmedMessages.length < originalCount) {
-    const trimmedTokens = countMessageTokens(trimmedMessages);
-    log.info("Messages trimmed to fit context window", {
-      originalMessages: originalCount,
-      trimmedMessages: trimmedMessages.length,
-      removedMessages: originalCount - trimmedMessages.length,
-      originalTokens,
-      trimmedTokens,
-      savedTokens: originalTokens - trimmedTokens,
+  // 验证：确保至少有一条非系统消息
+  // Anthropic API 要求至少有一条用户消息或对话内容
+  const hasNonSystemMessage = trimmedMessages.some(m => !(m instanceof SystemMessage));
+  if (!hasNonSystemMessage) {
+    const error = new Error("No conversation content available. Cannot proceed with empty conversation.");
+    log.error("Fatal: No conversation content", {
+      messageCount: messages.length,
+      systemMessageCount: messages.filter(m => m instanceof SystemMessage).length,
     });
-    log.info(`Context trimmed: ${originalCount} → ${trimmedMessages.length} messages`);
+    throw error;
   }
 
   log.llmStart(resolvedModelName, trimmedMessages.length, tools.length > 0);
@@ -540,8 +535,7 @@ export async function simpleChatWithModel(
   const config = getModelConfig(modelName);
   const resolvedModelName = config?.model || modelName;
 
-  // 自动裁剪消息
-  const trimmedMessages = autoTrimMessages(messages, modelName);
+  const trimmedMessages = messages;
 
   log.info("Simple chat started (no tools)", {
     model: resolvedModelName,
