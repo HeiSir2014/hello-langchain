@@ -6,13 +6,14 @@
  * - Mode indicator (> for prompt, ! for bash)
  * - Slash command suggestions with ◆ indicator
  * - Double ESC to clear input
- * - Ctrl+C to clear input, double Ctrl+C to exit
+ * - Ctrl+C to clear input (exit handled globally)
  * - Ctrl+G to open external editor
  * - Shift+Enter for newline
  * - Hints below input
  * - Model info display
  */
 import { Box, Text, useInput, useApp } from 'ink';
+import chalk from 'chalk';
 import React, { useState, memo, useMemo, useCallback } from 'react';
 import { getTheme } from '../utils/theme.js';
 import { useTerminalSize } from '../hooks/useTerminalSize.js';
@@ -20,22 +21,10 @@ import { useDoublePress } from '../hooks/useDoublePress.js';
 import { launchExternalEditor } from '../utils/externalEditor.js';
 import { getImageFromClipboard, CLIPBOARD_ERROR_MESSAGE, getImageInfo } from '../utils/imagePaste.js';
 import { type PermissionMode, MODE_CONFIGS } from '../../core/settings.js';
+import { getCommands } from '../commands/index.js';
+import { Cursor } from '../utils/Cursor.js';
 
 type InputMode = 'prompt' | 'bash';
-
-// Simple command suggestion
-interface CommandSuggestion {
-  name: string;
-  description: string;
-}
-
-const BUILT_IN_COMMANDS: CommandSuggestion[] = [
-  { name: 'help', description: 'Show help and available commands' },
-  { name: 'clear', description: 'Clear conversation history' },
-  { name: 'model', description: 'Switch model or show current model' },
-  { name: 'compact', description: 'Clear with summary' },
-  { name: 'exit', description: 'Exit the application' },
-];
 
 // Model info interface
 interface ModelInfo {
@@ -70,7 +59,7 @@ function PromptInputComponent({
   onChange,
   onSubmit,
   placeholder,
-  isDisabled = false,
+  isDisabled: _isDisabled = false,
   isLoading = false,
   modelInfo,
   onImagePaste,
@@ -86,7 +75,7 @@ function PromptInputComponent({
   const [selectedSuggestionIndex, setSelectedSuggestionIndex] = useState(0);
   const [statusMessage, setStatusMessage] = useState<string | null>(null); // Temporary status messages
   const [isEditorOpen, setIsEditorOpen] = useState(false);
-  const [pastedImage, setPastedImage] = useState<string | null>(null);
+  const [, setPastedImage] = useState<string | null>(null);
 
   // Paste detection state (for handling large pastes that arrive in chunks)
   const [pasteState, setPasteState] = useState<PasteState>({
@@ -121,14 +110,15 @@ function PromptInputComponent({
     }
   }, [value, cursorPosition, onChange, onImagePaste]);
 
-  // Calculate command suggestions
+  // Get available commands and calculate suggestions
+  const commands = useMemo(() => getCommands(), []);
   const commandSuggestions = useMemo(() => {
     if (!value.startsWith('/')) return [];
     const query = value.slice(1).toLowerCase();
-    return BUILT_IN_COMMANDS.filter(cmd =>
+    return commands.filter(cmd =>
       cmd.name.toLowerCase().startsWith(query)
     );
-  }, [value]);
+  }, [value, commands]);
 
   const showSuggestions = mode === 'prompt' && commandSuggestions.length > 0;
 
@@ -431,9 +421,10 @@ function PromptInputComponent({
     }
 
     // Handle Shift+Tab for permission mode cycling
+    // Order: default → acceptEdits → plan → bypassPermissions → default
     if (key.tab && key.shift) {
       if (onPermissionModeChange) {
-        const modes: PermissionMode[] = ['default', 'acceptEdits', 'bypassPermissions'];
+        const modes: PermissionMode[] = ['default', 'acceptEdits', 'plan', 'bypassPermissions'];
         const currentIndex = modes.indexOf(permissionMode);
         const nextIndex = (currentIndex + 1) % modes.length;
         onPermissionModeChange(modes[nextIndex]);
@@ -615,55 +606,18 @@ function PromptInputComponent({
     return { percent, pie, color };
   };
 
-  // Render value with cursor (supports multiline)
+  // Render value with cursor using Cursor class
+  // This provides proper handling for multiline text and cursor positioning
   const renderValueWithCursor = () => {
     if (value.length === 0) {
       return <Text inverse> </Text>;
     }
 
-    // Split value into lines first, then find which line has the cursor
-    const lines = value.split('\n');
-    let charCount = 0;
-    let cursorLineIndex = 0;
-    let cursorPosInLine = 0;
+    // Use Cursor class for proper text wrapping and cursor rendering
+    const cursor = Cursor.fromText(value, textInputWidth, cursorPosition);
+    const renderedValue = cursor.render(' ', '', chalk.inverse);
 
-    for (let i = 0; i < lines.length; i++) {
-      const lineLength = lines[i].length;
-      // Check if cursor is in this line (including the position right after last char)
-      if (cursorPosition <= charCount + lineLength) {
-        cursorLineIndex = i;
-        cursorPosInLine = cursorPosition - charCount;
-        break;
-      }
-      // +1 for the newline character
-      charCount += lineLength + 1;
-      cursorLineIndex = i + 1;
-      cursorPosInLine = 0;
-    }
-
-    return (
-      <Box flexDirection="column">
-        {lines.map((line, lineIndex) => {
-          if (lineIndex === cursorLineIndex) {
-            // This line contains the cursor
-            const before = line.slice(0, cursorPosInLine);
-            const cursorChar = line[cursorPosInLine] || ' ';
-            const after = line.slice(cursorPosInLine + 1);
-
-            return (
-              <Text key={lineIndex}>
-                {before}
-                <Text inverse>{cursorChar}</Text>
-                {after}
-              </Text>
-            );
-          }
-
-          // Regular line without cursor
-          return <Text key={lineIndex}>{line || ' '}</Text>;
-        })}
-      </Box>
-    );
+    return <Text>{renderedValue}</Text>;
   };
 
   return (
@@ -755,6 +709,25 @@ function PromptInputComponent({
         </Box>
       )}
 
+      {/* Plan mode banner */}
+      {permissionMode === 'plan' && !showSuggestions && (
+        <Box
+          flexDirection="column"
+          paddingX={2}
+          paddingY={0}
+          width="100%"
+          marginBottom={0}
+        >
+          <Box flexDirection="row" gap={1}>
+            <Text color="blue" bold>📝 PLAN MODE</Text>
+            <Text dimColor>- Research & planning (no code modifications)</Text>
+          </Box>
+          <Text dimColor>
+            Explore: Read, Glob, Grep, LS, Web | Plan: SavePlan, TodoWrite | ExitPlanMode to exit
+          </Text>
+        </Box>
+      )}
+
       {/* Hints bar below input */}
       {!showSuggestions && (
         <Box
@@ -772,6 +745,10 @@ function PromptInputComponent({
               </Text>
             ) : statusMessage ? (
               <Text color={theme.warning}>{statusMessage}</Text>
+            ) : permissionMode === 'plan' ? (
+              <Text color="blue">
+                {MODE_CONFIGS[permissionMode].icon} {MODE_CONFIGS[permissionMode].label}
+              </Text>
             ) : (
               <Text color={MODE_CONFIGS[permissionMode].color as any}>
                 {MODE_CONFIGS[permissionMode].icon} {MODE_CONFIGS[permissionMode].label}
@@ -784,6 +761,11 @@ function PromptInputComponent({
             {isLoading ? (
               <Text dimColor>
                 <Text bold>esc</Text> interrupt · <Text bold>enter</Text> queue message
+              </Text>
+            ) : permissionMode === 'plan' ? (
+              <Text dimColor>
+                <Text>/</Text> cmd
+                {' · '}<Text bold>shift+tab</Text> exit plan mode
               </Text>
             ) : (
               <Text dimColor>

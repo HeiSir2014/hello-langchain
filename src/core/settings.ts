@@ -25,8 +25,12 @@ export type ProviderType = "OLLAMA" | "OPENROUTER" | "OPENAI" | "ANTHROPIC";
 
 /**
  * Permission mode
+ * - default: Standard permission checking, ask for confirmation
+ * - acceptEdits: Auto-approve edit operations, only confirm bash
+ * - plan: Research/planning only, read-only tools only
+ * - bypassPermissions: All permissions bypassed (dangerous)
  */
-export type PermissionMode = "default" | "acceptEdits" | "bypassPermissions";
+export type PermissionMode = "default" | "acceptEdits" | "plan" | "bypassPermissions";
 
 /**
  * Permission mode configuration
@@ -36,7 +40,34 @@ export interface PermissionModeConfig {
   label: string;
   hint: string;
   color: string;
+  /** Mode only allows read-only tools */
+  readOnly?: boolean;
+  /** Mode requires confirmation for sensitive tools */
+  requireConfirmation?: boolean;
+  /** Mode bypasses all permission checks */
+  bypassValidation?: boolean;
+  /** Tools allowed in this mode (undefined = all, array = specific tools only) */
+  allowedTools?: string[];
 }
+
+/** Tools allowed in plan mode */
+export const PLAN_MODE_TOOLS = [
+  // Read-only exploration tools
+  "Read",
+  "Glob",
+  "Grep",
+  "LS",
+  "WebSearch",
+  "WebFetch",
+  "Location",
+  "BashOutput",
+  // Plan management tools (can write plans, not code)
+  "SavePlan",
+  "ReadPlan",
+  "TodoWrite",
+  // Exit plan mode
+  "ExitPlanMode",
+];
 
 /**
  * Permission mode configurations
@@ -47,18 +78,30 @@ export const MODE_CONFIGS: Record<PermissionMode, PermissionModeConfig> = {
     label: "ask permissions",
     hint: "shift+tab to cycle",
     color: "gray",
+    requireConfirmation: true,
   },
   acceptEdits: {
     icon: "⏵⏵",
     label: "accept edits on",
     hint: "shift+tab to cycle",
     color: "yellow",
+    requireConfirmation: false,
+  },
+  plan: {
+    icon: "📝",
+    label: "plan mode",
+    hint: "read-only tools only",
+    color: "blue",
+    readOnly: true,
+    requireConfirmation: true,
+    allowedTools: PLAN_MODE_TOOLS,
   },
   bypassPermissions: {
     icon: "⏵⏵⏵",
     label: "bypass permissions on",
     hint: "shift+tab to cycle",
     color: "red",
+    bypassValidation: true,
   },
 };
 
@@ -522,13 +565,52 @@ export function setPermissionMode(mode: PermissionMode): void {
 
 /**
  * Cycle through permission modes
+ * Order: default → acceptEdits → plan → bypassPermissions → default
  */
-export function cyclePermissionMode(): PermissionMode {
+export function cyclePermissionMode(skipBypass: boolean = false): PermissionMode {
   const currentMode = getPermissionMode();
-  const modes: PermissionMode[] = ["default", "acceptEdits", "bypassPermissions"];
+  let modes: PermissionMode[] = ["default", "acceptEdits", "plan", "bypassPermissions"];
+
+  // Skip bypass mode if in safe mode
+  if (skipBypass) {
+    modes = modes.filter(m => m !== "bypassPermissions");
+  }
+
   const currentIndex = modes.indexOf(currentMode);
   const nextIndex = (currentIndex + 1) % modes.length;
   const nextMode = modes[nextIndex];
   setPermissionMode(nextMode);
   return nextMode;
+}
+
+/**
+ * Check if current mode allows a specific tool
+ */
+export function isToolAllowedInCurrentMode(toolName: string): boolean {
+  const mode = getPermissionMode();
+  const config = MODE_CONFIGS[mode];
+
+  // If no tool restrictions, all tools allowed
+  if (!config.allowedTools) {
+    return true;
+  }
+
+  return config.allowedTools.includes(toolName);
+}
+
+/**
+ * Get allowed tools for current mode
+ */
+export function getAllowedToolsForCurrentMode(): string[] | null {
+  const mode = getPermissionMode();
+  const config = MODE_CONFIGS[mode];
+  return config.allowedTools || null;
+}
+
+/**
+ * Check if current mode is read-only
+ */
+export function isReadOnlyMode(): boolean {
+  const mode = getPermissionMode();
+  return MODE_CONFIGS[mode].readOnly === true;
 }

@@ -1,8 +1,12 @@
 import { readFileSync, existsSync } from "fs";
 import { join } from "path";
 import { homedir } from "os";
-import { getTodos, formatTodosForPrompt } from "../tools/todo.js";
+import { getTodos } from "../tools/todo.js";
 import { log } from "../../logger.js";
+import {
+  PROJECT_DIR_NAMES,
+  USER_DIR_NAMES,
+} from "../projectDirs.js";
 
 // 上下文项接口
 export interface ContextItem {
@@ -11,19 +15,28 @@ export interface ContextItem {
   priority: number; // 越高越靠前
 }
 
-// CLAUDE.md 文件位置
-const CLAUDE_MD_LOCATIONS = [
-  // 项目级别
-  { path: () => join(process.cwd(), "CLAUDE.md"), type: "project" as const },
-  { path: () => join(process.cwd(), ".claude", "CLAUDE.md"), type: "project" as const },
-  // 用户级别
-  { path: () => join(homedir(), ".claude", "CLAUDE.md"), type: "user" as const },
-];
-
 // 读取 CLAUDE.md 文件内容
+// Supports multiple locations with priority:
+// 1. Project root CLAUDE.md
+// 2. .claude/CLAUDE.md (Claude Code compatible)
+// 3. .yterm/CLAUDE.md
+// 4. ~/.claude/CLAUDE.md (user global)
+// 5. ~/.yterm/CLAUDE.md (user global)
 export function readClaudeMd(): { content: string; source: string } | null {
-  for (const location of CLAUDE_MD_LOCATIONS) {
-    const filePath = location.path();
+  const cwd = process.cwd();
+  const home = homedir();
+
+  // Check locations in priority order
+  const locations = [
+    // Project root (highest priority)
+    join(cwd, "CLAUDE.md"),
+    // Project config directories
+    ...PROJECT_DIR_NAMES.map((dir) => join(cwd, dir, "CLAUDE.md")),
+    // User config directories (lowest priority)
+    ...USER_DIR_NAMES.map((dir) => join(home, dir, "CLAUDE.md")),
+  ];
+
+  for (const filePath of locations) {
     if (existsSync(filePath)) {
       try {
         const content = readFileSync(filePath, "utf-8");

@@ -14,7 +14,7 @@ const help: Command = {
   isEnabled: true,
   isHidden: false,
   aliases: ['h'],
-  async call(onDone, context) {
+  async call(_args, onDone, context) {
     return <Help commands={context.commands} onClose={onDone} />;
   },
   userFacingName() {
