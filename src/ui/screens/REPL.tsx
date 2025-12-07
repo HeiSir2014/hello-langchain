@@ -134,6 +134,9 @@ export function REPL({ initialModel, initialPrompt }: REPLProps): React.ReactNod
     toolConfirm,
     setToolConfirm,
     setOnDone,
+    tokenUsage,
+    autoCompactCompleted,
+    resetAutoCompactFlag,
   } = useAgentEvents();
 
   // Session state
@@ -278,6 +281,16 @@ export function REPL({ initialModel, initialPrompt }: REPLProps): React.ReactNod
   useEffect(() => {
     setTodos(getTodos());
   }, [messages]);
+
+  // Handle auto-compact completion - clear screen by incrementing forkNumber
+  useEffect(() => {
+    if (autoCompactCompleted) {
+      // Increment fork number to force complete re-render (clear screen)
+      setForkNumber(prev => prev + 1);
+      // Reset the flag
+      resetAutoCompactFlag();
+    }
+  }, [autoCompactCompleted, resetAutoCompactFlag]);
 
   // Handle initial prompt
   useEffect(() => {
@@ -513,58 +526,31 @@ export function REPL({ initialModel, initialPrompt }: REPLProps): React.ReactNod
     return true;
   }, []);
 
-  // Token usage - estimate from UI messages + base system prompt tokens
-  const tokenUsage = useMemo(() => {
-    // Base tokens for system prompt (approximately)
-    const SYSTEM_PROMPT_TOKENS = 2500;
-
-    let total = SYSTEM_PROMPT_TOKENS;
-
-    for (const msg of messages) {
-      const overhead = 4;
-      switch (msg.type) {
-        case 'user':
-        case 'assistant':
-        case 'system':
-        case 'error':
-          total += overhead + estimateTokens(msg.content || '');
-          break;
-        case 'tool_use':
-          total += overhead + estimateTokens(msg.name || '') + estimateTokens(JSON.stringify(msg.args || {})) + 10;
-          if (msg.result) {
-            total += overhead + estimateTokens(msg.result);
-          }
-          break;
-        case 'bash_input':
-          total += overhead + estimateTokens(msg.command || '');
-          break;
-        case 'bash_output':
-          total += overhead + estimateTokens((msg.stdout || '') + (msg.stderr || ''));
-          break;
-      }
-    }
-    return total;
-  }, [messages]);
-
-  // Simple token estimation
-  function estimateTokens(text: string): number {
-    if (!text) return 0;
-    const chineseChars = (text.match(/[\u4e00-\u9fa5]/g) || []).length;
-    const otherChars = text.length - chineseChars;
-    return Math.ceil(chineseChars / 1.5) + Math.ceil(otherChars / 4);
-  }
 
   // Get model info
   const modelInfo = useMemo(() => {
     const config = getModelConfig(currentModel);
     if (!config) return null;
 
-    return {
+    const info = {
       name: config.model || currentModel,
       provider: config.provider || 'unknown',
-      contextLength: config.contextWindow || 128000,
-      currentTokens: tokenUsage,
+      contextLength: tokenUsage?.contextLimit || config.contextWindow || 128000,
+      currentTokens: tokenUsage?.tokenCount || 0,
     };
+
+    // Log model info display
+    const percent = Math.round((info.currentTokens / info.contextLength) * 100);
+    log.debug('Model info display', {
+      model: info.name,
+      provider: info.provider,
+      currentTokens: info.currentTokens,
+      contextLength: info.contextLength,
+      percentUsed: percent,
+      display: `${Math.round(info.currentTokens / 1000)}k / ${Math.round(info.contextLength / 1000)}k ${percent}%`
+    });
+
+    return info;
   }, [currentModel, tokenUsage]);
 
   // Build messagesJSX

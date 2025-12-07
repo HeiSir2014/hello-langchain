@@ -30,6 +30,7 @@ export type AgentEventType =
   | { type: 'confirm_required'; tools: ToolConfirmation[] }
   | { type: 'compacting'; tokenCount?: number }
   | { type: 'auto_compact'; messagesBefore: number; messagesAfter: number; summary?: string }
+  | { type: 'token_usage'; tokenCount: number; contextLimit: number; percentUsed: number }
   | { type: 'done'; interrupted?: boolean };
 
 class AgentEventEmitter extends EventEmitter {
@@ -78,6 +79,9 @@ export const emitCompacting = (tokenCount?: number) =>
 
 export const emitAutoCompact = (messagesBefore: number, messagesAfter: number, summary?: string) =>
   agentEvents.emit('agent', { type: 'auto_compact', messagesBefore, messagesAfter, summary });
+
+export const emitTokenUsage = (tokenCount: number, contextLimit: number, percentUsed: number) =>
+  agentEvents.emit('agent', { type: 'token_usage', tokenCount, contextLimit, percentUsed });
 
 export const emitDone = (interrupted = false) =>
   agentEvents.emit('agent', { type: 'done', interrupted });
