@@ -1,0 +1,10 @@
+[build]
+# 确保使用生产环境的 JSX 转换
+jsx = "react-jsx"
+jsx-runtime = "automatic"
+
+# 优化设置
+minify = { whitespace = true, syntax = true, identifiers = false }
+
+# 外部依赖
+external = ["@vscode/ripgrep", "react-devtools-core"]

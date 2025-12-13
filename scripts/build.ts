@@ -16,6 +16,11 @@ import { $ } from "bun";
 import { existsSync, mkdirSync, rmSync, copyFileSync, chmodSync, readFileSync, writeFileSync } from "fs";
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
+import { config } from "dotenv";
+
+// Load environment variables from .env.local
+const envLocalPath = join(dirname(fileURLToPath(import.meta.url)), "..", ".env.local");
+config({ path: envLocalPath, override: true });
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT_DIR = join(__dirname, "..");
@@ -134,11 +139,33 @@ async function compileForTarget(targetInfo?: { name: string; bunTarget: string }
 
   console.log(`   ⏳ Compiling for ${targetName}...`);
 
+  // 显示使用的环境变量配置
+  console.log(`   📋 Environment Configuration:`);
+  console.log(`      Provider: ${process.env.USE_PROVIDER || "OLLAMA"}`);
+  if (process.env.USE_PROVIDER === "ANTHROPIC") {
+    console.log(`      Anthropic Model: ${process.env.ANTHROPIC_MODEL_NAME || "claude-sonnet-4-20250514"}`);
+    console.log(`      Anthropic API: ${process.env.ANTHROPIC_API_KEY ? "✓ Configured" : "✗ Not configured"}`);
+    console.log(`      Anthropic Base URL: ${process.env.ANTHROPIC_BASE_URL || "https://api.anthropic.com"}`);
+  } else if (process.env.USE_PROVIDER === "OPENAI") {
+    console.log(`      OpenAI Model: ${process.env.OPENAI_MODEL_NAME || "gpt-4o"}`);
+    console.log(`      OpenAI API: ${process.env.OPENAI_API_KEY ? "✓ Configured" : "✗ Not configured"}`);
+    console.log(`      OpenAI Base URL: ${process.env.OPENAI_BASE_URL || "https://api.openai.com/v1"}`);
+  } else if (process.env.USE_PROVIDER === "OPENROUTER") {
+    console.log(`      OpenRouter Model: ${process.env.OPENROUTER_MODEL_NAME || "x-ai/grok-2-1212"}`);
+    console.log(`      OpenRouter API: ${process.env.OPENROUTER_API_KEY ? "✓ Configured" : "✗ Not configured"}`);
+  } else if (process.env.USE_PROVIDER === "OLLAMA") {
+    console.log(`      Ollama Host: ${process.env.OLLAMA_HOST || "http://localhost:11434"}`);
+    console.log(`      Ollama Model: ${process.env.OLLAMA_MODEL_NAME || "qwen3:4b"}`);
+  }
+  console.log("");
+
   try {
+    // 使用命令行方式，但禁用标识符混淆
     const compileArgs = [
       "build",
       "--compile",
-      "--minify",
+      "--minify-whitespace",
+      "--minify-syntax",
       "--sourcemap",
       entryPoint,
       "--outfile",
@@ -150,7 +177,40 @@ async function compileForTarget(targetInfo?: { name: string; bunTarget: string }
       compileArgs.push("--target", bunTarget);
     }
 
-    await $`bun ${compileArgs}`.cwd(ROOT_DIR);
+    // 编译时环境变量配置
+    const defines = {
+      // 构建时设置 NODE_ENV 为 production
+      "process.env.NODE_ENV": JSON.stringify("production"),
+      // 从环境变量读取配置，优先使用 .env.local 中的值
+      "process.env.USE_PROVIDER": JSON.stringify(process.env.USE_PROVIDER || "OLLAMA"),
+      "process.env.ANTHROPIC_API_KEY": JSON.stringify(process.env.ANTHROPIC_API_KEY || ""),
+      "process.env.ANTHROPIC_MODEL_NAME": JSON.stringify(process.env.ANTHROPIC_MODEL_NAME || "claude-sonnet-4-20250514"),
+      "process.env.ANTHROPIC_MODEL_CONTEXT_LENGTH": JSON.stringify(process.env.ANTHROPIC_MODEL_CONTEXT_LENGTH || "200000"),
+      "process.env.ANTHROPIC_BASE_URL": JSON.stringify(process.env.ANTHROPIC_BASE_URL || "https://api.anthropic.com"),
+      "process.env.OPENAI_API_KEY": JSON.stringify(process.env.OPENAI_API_KEY || ""),
+      "process.env.OPENAI_MODEL_NAME": JSON.stringify(process.env.OPENAI_MODEL_NAME || "gpt-4o"),
+      "process.env.OPENAI_MODEL_CONTEXT_LENGTH": JSON.stringify(process.env.OPENAI_MODEL_CONTEXT_LENGTH || "128000"),
+      "process.env.OPENAI_BASE_URL": JSON.stringify(process.env.OPENAI_BASE_URL || "https://api.openai.com/v1"),
+      "process.env.OPENROUTER_API_KEY": JSON.stringify(process.env.OPENROUTER_API_KEY || ""),
+      "process.env.OPENROUTER_MODEL_NAME": JSON.stringify(process.env.OPENROUTER_MODEL_NAME || "x-ai/grok-2-1212"),
+      "process.env.OPENROUTER_MODEL_CONTEXT_LENGTH": JSON.stringify(process.env.OPENROUTER_MODEL_CONTEXT_LENGTH || "131072"),
+      "process.env.OLLAMA_HOST": JSON.stringify(process.env.OLLAMA_HOST || "http://localhost:11434"),
+      "process.env.OLLAMA_MODEL_NAME": JSON.stringify(process.env.OLLAMA_MODEL_NAME || "qwen3:4b"),
+      "process.env.OLLAMA_CLOUD_HOST": JSON.stringify(process.env.OLLAMA_CLOUD_HOST || "https://ollama.com"),
+      "process.env.OLLAMA_CLOUD_API_KEY": JSON.stringify(process.env.OLLAMA_CLOUD_API_KEY || ""),
+    };
+
+    // 将 defines 转换为命令行参数
+    const defineArgs: string[] = [];
+    for (const [key, value] of Object.entries(defines)) {
+      defineArgs.push("--define", `${key}=${value}`);
+    }
+
+    // 构建完整的编译命令
+    const fullCompileArgs = [...compileArgs, ...defineArgs];
+
+    console.log(`   🔧 Running: bun ${fullCompileArgs.join(" ")}`);
+    await $`bun ${fullCompileArgs}`.cwd(ROOT_DIR);
 
     const { size } = Bun.file(outFile);
     const sizeMB = (size / 1024 / 1024).toFixed(2);
@@ -170,18 +230,26 @@ async function compileForTarget(targetInfo?: { name: string; bunTarget: string }
 }
 
 async function copyRipgrepBinary(targetDir: string) {
-  const rgSrcPath = join(ROOT_DIR, "node_modules/@vscode/ripgrep/bin/rg");
+  // Determine the correct binary name based on platform
+  const isWindows = platform === "win32";
+  const rgBinaryName = isWindows ? "rg.exe" : "rg";
+  const rgSrcPath = join(ROOT_DIR, "node_modules/@vscode/ripgrep/bin", rgBinaryName);
   const rgDestDir = join(targetDir, "bin");
-  const rgDestPath = join(rgDestDir, "rg");
+  const rgDestPath = join(rgDestDir, rgBinaryName);
 
   if (existsSync(rgSrcPath)) {
     mkdirSync(rgDestDir, { recursive: true });
     copyFileSync(rgSrcPath, rgDestPath);
-    chmodSync(rgDestPath, 0o755);
-    console.log(`   ✅ Copied ripgrep binary to ${rgDestDir}`);
+
+    // Only set execute permissions on Unix systems
+    if (!isWindows) {
+      chmodSync(rgDestPath, 0o755);
+    }
+
+    console.log(`   ✅ Copied ripgrep binary to ${rgDestDir} (${rgBinaryName})`);
 
     // Create wrapper script
-    const wrapperScript = platform === "win32"
+    const wrapperScript = isWindows
       ? `@echo off
 setlocal
 set "SCRIPT_DIR=%~dp0"
@@ -194,13 +262,18 @@ export PATH="$SCRIPT_DIR/bin:$PATH"
 exec "$SCRIPT_DIR/yterm" "$@"
 `;
 
-    const wrapperName = platform === "win32" ? "yterm-run.bat" : "yterm-run";
+    const wrapperName = isWindows ? "yterm-run.bat" : "yterm-run";
     const wrapperPath = join(targetDir, wrapperName);
     writeFileSync(wrapperPath, wrapperScript);
-    chmodSync(wrapperPath, 0o755);
+
+    // Only set execute permissions on Unix systems
+    if (!isWindows) {
+      chmodSync(wrapperPath, 0o755);
+    }
+
     console.log(`   ✅ Created wrapper script: ${wrapperName}`);
   } else {
-    console.warn("   ⚠️  ripgrep binary not found locally");
+    console.warn(`   ⚠️  ripgrep binary not found locally: ${rgSrcPath}`);
   }
 }
 

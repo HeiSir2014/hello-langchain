@@ -122,8 +122,7 @@ export function REPL({ initialModel, initialPrompt }: REPLProps): React.ReactNod
     messages,
     addUserMessage,
     addSystemMessage,
-    addBashInput,
-    addBashOutput,
+    addBashResult,
     clearMessages,
     restoreMessages,
     isLoading,
@@ -131,6 +130,7 @@ export function REPL({ initialModel, initialPrompt }: REPLProps): React.ReactNod
     isCompacting,
     compactingTokens,
     streamingContent,
+    setStreamingContent,
     toolConfirm,
     setToolConfirm,
     setOnDone,
@@ -299,6 +299,10 @@ export function REPL({ initialModel, initialPrompt }: REPLProps): React.ReactNod
     }
   }, [initialPrompt]);
 
+  // AbortController for bash commands
+  const bashAbortControllerRef = useRef<AbortController | null>(null);
+
+
   // Handle user input
   const handleSubmit = useCallback(async (input: string) => {
     if (!input.trim()) return;
@@ -315,15 +319,35 @@ export function REPL({ initialModel, initialPrompt }: REPLProps): React.ReactNod
       const command = input.slice(1).trim();
       if (!command) return;
 
-      addBashInput(command);
+      // Don't add to messages yet - show in dynamic area during execution
       setIsLoading(true);
+      setStreamingContent(`\`${command}\`\n`);
+
+      // Create new AbortController for this command
+      bashAbortControllerRef.current = new AbortController();
 
       try {
-        const result = await executeBashCommand(command);
-        addBashOutput(result.stdout, result.stderr, result.isError);
+        const result = await executeBashCommand(command, {
+          abortSignal: bashAbortControllerRef.current.signal,
+          onOutput: (stdout, stderr) => {
+            // Format output for streaming display (show last N lines)
+            const MAX_LINES = 10;
+            const output = stdout + stderr;
+            const lines = output.split('\n').filter(l => l);
+            const displayLines = lines.slice(-MAX_LINES);
+            const hasMore = lines.length > MAX_LINES;
+            const prefix = hasMore ? `... (${lines.length - MAX_LINES} more lines)\n` : '';
+            setStreamingContent(`\`${command}\`\n${prefix}${displayLines.join('\n')}`);
+          },
+        });
+        // Clear streaming output and add final result to Static area
+        setStreamingContent('');
+        addBashResult(command, result.stdout, result.stderr, result.isError);
       } catch (error: any) {
-        addBashOutput('', error.message, true);
+        setStreamingContent('');
+        addBashResult(command, '', error.message, true);
       } finally {
+        bashAbortControllerRef.current = null;
         setIsLoading(false);
       }
       return;
@@ -346,7 +370,7 @@ export function REPL({ initialModel, initialPrompt }: REPLProps): React.ReactNod
       const errorMessage = error instanceof Error ? error.message : String(error);
       addSystemMessage(`Error: ${errorMessage}`);
     }
-  }, [isLoading, addUserMessage, addSystemMessage, addBashInput, addBashOutput, setIsLoading]);
+  }, [isLoading, addUserMessage, addSystemMessage, addBashResult, setIsLoading]);
 
   // Process pending input when loading completes
   useEffect(() => {
@@ -496,6 +520,16 @@ export function REPL({ initialModel, initialPrompt }: REPLProps): React.ReactNod
     // Allow Esc to interrupt when loading OR when a tool is executing
     // But not when permission confirmation is showing (toolConfirm handles its own Esc)
     if (key.escape && (isLoading || hasExecutingTool) && !hasInterrupted && !toolConfirm) {
+      // Check if we're running a bash command (! prefix)
+      if (bashAbortControllerRef.current) {
+        bashAbortControllerRef.current.abort();
+        setHasInterrupted(true);
+        setStreamingContent('');
+        // No need to add system message - the bash output will show interrupted status
+        return;
+      }
+
+      // Otherwise interrupt the agent
       const aborted = abortCurrentRequest();
       if (aborted) {
         setHasInterrupted(true);
