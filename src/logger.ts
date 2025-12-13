@@ -1,9 +1,13 @@
 import winston from "winston";
 import { mkdirSync, existsSync } from "fs";
 import { join } from "path";
+import { homedir } from "os";
 
-// 日志目录
-const LOG_DIR = join(process.cwd(), "logs");
+// 日志目录 - 根据 NODE_ENV 决定
+const isProduction = process.env.NODE_ENV === "production";
+const LOG_DIR = isProduction
+  ? join(homedir(), ".yterm", "logs")  // 生产模式：~/.yterm/logs
+  : join(process.cwd(), "logs");        // 开发模式：./logs
 
 // 确保日志目录存在
 if (!existsSync(LOG_DIR)) {

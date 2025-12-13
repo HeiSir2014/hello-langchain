@@ -34,6 +34,8 @@ const PRODUCT_COMMAND = 'yterm';
 const TEMPFILE_PREFIX = tmpdir() + `/${PRODUCT_COMMAND}-`;
 const DEFAULT_TIMEOUT = 30 * 60 * 1000;
 const SIGTERM_CODE = 143;
+// Syntax check timeout - longer on Windows due to Git Bash startup overhead
+const SYNTAX_CHECK_TIMEOUT = process.platform === 'win32' ? 5000 : 5000;
 const FILE_SUFFIXES = {
   STATUS: '-status',
   STDOUT: '-stdout',
@@ -167,7 +169,7 @@ function detectShell(): DetectedShell {
   try {
     execSync('wsl.exe -e bash -lc "echo YTERM_OK"', { stdio: 'ignore', timeout: 1500 });
     return { bin: 'wsl.exe', args: ['-e', 'bash', '-l'], type: 'wsl' };
-  } catch {}
+  } catch { }
 
   const hint = [
     '无法找到可用的 bash。请安装 Git for Windows 或启用 WSL。',
@@ -336,35 +338,42 @@ export class PersistentShell {
   private async exec_(command: string, timeout?: number, onOutput?: OutputCallback): Promise<ExecResult> {
     const quotedCommand = quoteForBash(command);
 
-    // Check syntax
-    try {
-      if (this.shellType === 'wsl') {
-        execFileSync('wsl.exe', ['-e', 'bash', '-n', '-c', command], {
-          stdio: 'ignore',
-          timeout: 1000,
-        });
-      } else if (this.shellType === 'msys') {
-        execFileSync(this.binShell, ['-n', '-c', command], {
-          stdio: 'ignore',
-          timeout: 1000,
-        });
-      } else {
-        execSync(`${this.binShell} -n -c ${quotedCommand}`, {
-          stdio: 'ignore',
-          timeout: 1000,
+    // Check syntax (skip on MSYS/Windows due to slow startup overhead)
+    // On MSYS, the persistent shell will report syntax errors anyway
+    if (this.shellType !== 'msys') {
+      try {
+        if (this.shellType === 'wsl') {
+          execFileSync('wsl.exe', ['-e', 'bash', '-n', '-c', command], {
+            stdio: 'ignore',
+            timeout: SYNTAX_CHECK_TIMEOUT,
+          });
+        } else {
+          execSync(`${this.binShell} -n -c ${quotedCommand}`, {
+            stdio: 'ignore',
+            timeout: SYNTAX_CHECK_TIMEOUT,
+          });
+        }
+      } catch (error) {
+        const execError = error as any;
+        // Handle timeout errors (code is string like 'ETIMEDOUT')
+        const isTimeout = execError?.code === 'ETIMEDOUT' || execError?.signal === 'SIGTERM';
+        // Only use status if it's a number, otherwise default to 2 for syntax errors
+        const actualExitCode = typeof execError?.status === 'number' ? execError.status : 2;
+
+        let errorStr: string;
+        if (isTimeout) {
+          errorStr = 'Syntax check timed out - command may be too complex or shell is unresponsive';
+        } else {
+          errorStr = execError?.stderr?.toString() || execError?.message || String(error || '');
+        }
+
+        return Promise.resolve({
+          stdout: '',
+          stderr: errorStr,
+          code: actualExitCode,
+          interrupted: isTimeout,
         });
       }
-    } catch (error) {
-      const execError = error as any;
-      const actualExitCode = execError?.status ?? execError?.code ?? 2;
-      const errorStr = execError?.stderr?.toString() || execError?.message || String(error || '');
-
-      return Promise.resolve({
-        stdout: '',
-        stderr: errorStr,
-        code: actualExitCode,
-        interrupted: false,
-      });
     }
 
     const commandTimeout = timeout || DEFAULT_TIMEOUT;

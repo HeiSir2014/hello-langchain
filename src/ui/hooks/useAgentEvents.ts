@@ -186,6 +186,15 @@ export function useAgentEvents() {
     }]);
   }, []);
 
+  // Add bash command and output together (for ! mode - after execution completes)
+  const addBashResult = useCallback((command: string, stdout: string, stderr: string, isError?: boolean) => {
+    setMessages(prev => [
+      ...prev,
+      { type: 'bash_input', command, id: generateMessageId() },
+      { type: 'bash_output', stdout, stderr, isError, id: generateMessageId() },
+    ]);
+  }, []);
+
   const clearMessages = useCallback(() => {
     setMessages([]);
   }, []);
@@ -211,6 +220,7 @@ export function useAgentEvents() {
     addSystemMessage,
     addBashInput,
     addBashOutput,
+    addBashResult,
     clearMessages,
     restoreMessages,
     isLoading,
@@ -218,6 +228,7 @@ export function useAgentEvents() {
     isCompacting,
     compactingTokens,
     streamingContent,
+    setStreamingContent,
     toolConfirm,
     setToolConfirm,
     setOnDone,

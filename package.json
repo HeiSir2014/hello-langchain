@@ -7,7 +7,8 @@
     "yterm": "./dist/cli.js"
   },
   "scripts": {
-    "start": "bun run src/cli.tsx",
+    "start": "NODE_ENV=development bun run src/cli.tsx",
+    "dev": "NODE_ENV=development bun run src/cli.tsx",
     "build": "tsc",
     "build:bundle": "bun run scripts/build.ts",
     "build:compile": "bun run scripts/build.ts --compile",
