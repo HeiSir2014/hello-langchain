@@ -13,25 +13,9 @@ import { StructuredToolInterface } from "@langchain/core/tools";
 import { BaseMessage, AIMessageChunk, SystemMessage } from "@langchain/core/messages";
 import { concat } from "@langchain/core/utils/stream";
 import { getModelConfig, ProviderType, ModelType, ModelConfig } from "../config.js";
+import { getSettings } from "../settings.js";
 import { log } from "../../logger.js";
 import { emitStreaming } from "./events.js";
-
-// ============ Provider 配置 ============
-
-// Anthropic
-const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || "";
-const ANTHROPIC_BASE_URL = process.env.ANTHROPIC_BASE_URL || "";
-
-// OpenAI
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
-const OPENAI_BASE_URL = process.env.OPENAI_BASE_URL || "";
-
-// OpenRouter (使用 OpenAI 兼容接口)
-const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY || "";
-const OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1";
-
-// Ollama
-const OLLAMA_BASE_URL = process.env.OLLAMA_HOST || "http://localhost:11434";
 
 // ============ 模型工厂 ============
 
@@ -47,14 +31,18 @@ const VERSION = "1.0.0";
  * 创建 Anthropic 聊天模型
  */
 function createAnthropicModel(config: ModelConfig): BaseChatModel {
-  if (!ANTHROPIC_API_KEY) {
+  const settings = getSettings();
+  const apiKey = settings.anthropic.apiKey;
+  const baseUrl = settings.anthropic.baseUrl;
+
+  if (!apiKey) {
     throw new Error("ANTHROPIC_API_KEY is not configured");
   }
 
-  log.debug("Creating Anthropic model", { model: config.model, baseURL: ANTHROPIC_BASE_URL || "default" });
+  log.debug("Creating Anthropic model", { model: config.model, baseURL: baseUrl || "default" });
 
   const options: any = {
-    apiKey: ANTHROPIC_API_KEY,
+    apiKey: apiKey,
     model: config.model,
     maxTokens: 16384,
     temperature: 0.7,
@@ -66,10 +54,10 @@ function createAnthropicModel(config: ModelConfig): BaseChatModel {
   };
 
   // 支持自定义 API 端点 (代理或兼容接口)
-  if (ANTHROPIC_BASE_URL) {
+  if (baseUrl) {
     options.clientOptions = {
       ...options.clientOptions,
-      baseURL: ANTHROPIC_BASE_URL,
+      baseURL: baseUrl,
     };
   }
 
@@ -80,22 +68,26 @@ function createAnthropicModel(config: ModelConfig): BaseChatModel {
  * 创建 OpenAI 聊天模型
  */
 function createOpenAIModel(config: ModelConfig): BaseChatModel {
-  if (!OPENAI_API_KEY) {
+  const settings = getSettings();
+  const apiKey = settings.openAI.apiKey;
+  const baseUrl = settings.openAI.baseUrl;
+
+  if (!apiKey) {
     throw new Error("OPENAI_API_KEY is not configured");
   }
 
-  log.debug("Creating OpenAI model", { model: config.model, baseURL: OPENAI_BASE_URL || "default" });
+  log.debug("Creating OpenAI model", { model: config.model, baseURL: baseUrl || "default" });
 
   const options: any = {
-    apiKey: OPENAI_API_KEY,
+    apiKey: apiKey,
     model: config.model,
     temperature: 0.7,
   };
 
   // 支持自定义 API 端点 (代理或兼容接口)
-  if (OPENAI_BASE_URL) {
+  if (baseUrl) {
     options.configuration = {
-      baseURL: OPENAI_BASE_URL,
+      baseURL: baseUrl,
     };
   }
 
@@ -106,18 +98,21 @@ function createOpenAIModel(config: ModelConfig): BaseChatModel {
  * 创建 OpenRouter 聊天模型 (通过 OpenAI 兼容接口)
  */
 function createOpenRouterModel(config: ModelConfig): BaseChatModel {
-  if (!OPENROUTER_API_KEY) {
+  const settings = getSettings();
+  const apiKey = settings.openRouter.apiKey;
+
+  if (!apiKey) {
     throw new Error("OPENROUTER_API_KEY is not configured");
   }
 
   log.debug("Creating OpenRouter model", { model: config.model });
 
   return new ChatOpenAI({
-    apiKey: OPENROUTER_API_KEY,
+    apiKey: apiKey,
     model: config.model,
     temperature: 0.7,
     configuration: {
-      baseURL: OPENROUTER_BASE_URL,
+      baseURL: "https://openrouter.ai/api/v1",
       defaultHeaders: {
         "HTTP-Referer": "https://github.com/HeiSir2014/hello-langchain",
         "X-Title": "YTerm",
@@ -153,17 +148,18 @@ function supportsThinking(modelName: string): boolean {
  * 2. 模型名称包含 "-cloud" 后缀（兼容旧配置）
  */
 function createOllamaModel(config: ModelConfig): BaseChatModel {
+  const settings = getSettings();
+  const localHost = settings.ollama.host;
+  const cloudHost = settings.ollama.cloudHost;
+  const cloudApiKey = settings.ollama.cloudApiKey;
+
   // 判断是否是云端模型
   // 优先使用 config.type（从 Ollama API 动态获取时已设置）
   // 兼容旧的 "-cloud" 后缀命名规则
   const isCloudModel = config.type === ModelType.CLOUD || config.model.includes("-cloud");
 
-  // 获取云端配置
-  const OLLAMA_CLOUD_HOST = process.env.OLLAMA_CLOUD_HOST || "https://ollama.com";
-  const OLLAMA_CLOUD_API_KEY = process.env.OLLAMA_CLOUD_API_KEY || process.env.OLLAMA_API_KEY || "";
-
   // 根据模型类型选择地址
-  const baseUrl = isCloudModel ? OLLAMA_CLOUD_HOST : OLLAMA_BASE_URL;
+  const baseUrl = isCloudModel ? cloudHost : localHost;
 
   // 检查是否支持 thinking 功能
   const enableThinking = supportsThinking(config.model);
@@ -177,7 +173,7 @@ function createOllamaModel(config: ModelConfig): BaseChatModel {
   });
 
   // 警告：云端模型但没有配置 API Key
-  if (isCloudModel && !OLLAMA_CLOUD_API_KEY) {
+  if (isCloudModel && !cloudApiKey) {
     log.warn("OLLAMA_CLOUD_API_KEY not configured for cloud model", { model: config.model });
   }
 
@@ -193,9 +189,9 @@ function createOllamaModel(config: ModelConfig): BaseChatModel {
 
   // 云端模型需要 API Key 认证
   // 参考: https://docs.ollama.com/api/authentication
-  if (isCloudModel && OLLAMA_CLOUD_API_KEY) {
+  if (isCloudModel && cloudApiKey) {
     ollamaOptions.headers = {
-      "Authorization": `Bearer ${OLLAMA_CLOUD_API_KEY}`,
+      "Authorization": `Bearer ${cloudApiKey}`,
     };
   }
 
