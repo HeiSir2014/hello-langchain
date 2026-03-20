@@ -4,11 +4,11 @@ import {
   Annotation,
   START,
   END,
-  MemorySaver,
   interrupt,
   Command,
 } from "@langchain/langgraph";
 import { ToolNode } from "@langchain/langgraph/prebuilt";
+import { createCheckpointer, type Checkpointer } from "./checkpointer.js";
 import { AIMessage, AIMessageChunk, HumanMessage, SystemMessage, BaseMessage, ToolMessage, RemoveMessage } from "@langchain/core/messages";
 import { RunnableConfig } from "@langchain/core/runnables";
 import {
@@ -282,8 +282,8 @@ export function getToolConfirmation(): boolean {
 
 // ============ Checkpointer (持久化) ============
 
-// 使用 MemorySaver 实现对话持久化
-const checkpointer = new MemorySaver();
+// 使用 SQLite 持久化 checkpointer（自动降级到 MemorySaver）
+const checkpointer: Checkpointer = createCheckpointer();
 
 // 当前线程 ID
 let currentThreadId = `thread_${Date.now()}`;

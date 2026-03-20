@@ -1,33 +1,19 @@
 /**
- * Plan Agent - LangGraph Subgraph for Planning Mode
+ * Plan Agent - LangChain 1.0 createAgent for Planning Mode
  *
- * This module implements a specialized planning agent using LangGraph best practices:
- * - StateGraph for state management
- * - Read-only tools only (Glob, Grep, Read, LS, WebSearch, WebFetch)
- * - ExitPlanMode tool to transition back to normal mode
- * - Generates structured plans with implementation steps
+ * Migrated from custom StateGraph to LangChain 1.0's createAgent.
+ * Uses read-only tools + ExitPlanMode for plan mode research and planning.
  *
  * The plan agent helps with research and planning before implementation.
  */
-import {
-  StateGraph,
-  Annotation,
-  START,
-  END,
-} from "@langchain/langgraph";
-import { AIMessage, HumanMessage, SystemMessage, BaseMessage, ToolMessage } from "@langchain/core/messages";
-import { RunnableConfig } from "@langchain/core/runnables";
-import { tool } from "@langchain/core/tools";
-import { ToolNode } from "@langchain/langgraph/prebuilt";
+import { createAgent, tool } from "langchain";
 import { z } from "zod";
 import { log } from "../../logger.js";
-import { callChatModel } from "./models.js";
+import { getChatModel } from "./models.js";
 import { getAgentModel } from "./index.js";
 import { setPermissionMode } from "../settings.js";
 import {
   emitThinking,
-  emitToolUse,
-  emitToolResult,
   emitResponse,
   emitDone,
 } from "./events.js";
@@ -37,62 +23,6 @@ import { Read, Glob, Grep, LS } from "../tools/file.js";
 import { WebSearch, WebFetch } from "../tools/web.js";
 import { SavePlan } from "../tools/plan.js";
 
-// ============ State Definition ============
-
-/**
- * Plan Agent State using LangGraph Annotation
- */
-const PlanAgentState = Annotation.Root({
-  // User's planning request
-  userRequest: Annotation<string>({
-    reducer: (_, y) => y,
-  }),
-
-  // Generated plan content
-  planContent: Annotation<string | null>({
-    reducer: (_, y) => y,
-    default: () => null,
-  }),
-
-  // Plan file path (if saved)
-  planFilePath: Annotation<string | null>({
-    reducer: (_, y) => y,
-    default: () => null,
-  }),
-
-  // Messages for LLM conversation
-  messages: Annotation<BaseMessage[]>({
-    reducer: (x, y) => [...x, ...y],
-    default: () => [],
-  }),
-
-  // Status tracking
-  status: Annotation<"researching" | "planning" | "completed" | "exited" | "error">({
-    reducer: (_, y) => y,
-    default: () => "researching",
-  }),
-
-  // Error message if any
-  error: Annotation<string | null>({
-    reducer: (_, y) => y,
-    default: () => null,
-  }),
-
-  // Whether plan mode should be exited
-  shouldExitPlanMode: Annotation<boolean>({
-    reducer: (_, y) => y,
-    default: () => false,
-  }),
-
-  // Previous permission mode to restore
-  previousMode: Annotation<string | null>({
-    reducer: (_, y) => y,
-    default: () => null,
-  }),
-});
-
-type PlanAgentStateType = typeof PlanAgentState.State;
-
 // ============ Tools ============
 
 /**
@@ -101,8 +31,6 @@ type PlanAgentStateType = typeof PlanAgentState.State;
 const ExitPlanModeTool = tool(
   async ({ planSummary }: { planSummary?: string }) => {
     log.info("Exiting plan mode", { hasSummary: !!planSummary });
-
-    // Will be handled by the agent to restore previous mode
     return JSON.stringify({
       action: "exit_plan_mode",
       summary: planSummary || "Plan mode completed",
@@ -123,7 +51,6 @@ Optionally provide a summary of what was planned.`,
 );
 
 // Combine read-only tools with plan-specific tools
-// Note: SavePlan is imported from ../tools/plan.js
 const planTools = [
   Read,
   Glob,
@@ -134,8 +61,6 @@ const planTools = [
   ExitPlanModeTool,
   SavePlan,
 ];
-
-const toolNode = new ToolNode(planTools);
 
 // ============ System Prompt ============
 
@@ -202,206 +127,21 @@ Use the ExitPlanMode tool when:
 
 Remember: You are in read-only mode. Focus on research and planning only.`;
 
-// ============ Nodes ============
+// ============ Agent Creation ============
 
 /**
- * Node: Research and analyze using read-only tools
+ * Create the plan agent using LangChain 1.0 createAgent
  */
-async function researchNode(
-  state: PlanAgentStateType,
-  _config?: RunnableConfig
-): Promise<Partial<PlanAgentStateType>> {
-  log.nodeStart("plan/research", { userRequest: state.userRequest });
+function buildPlanAgent() {
+  const model = getChatModel(getAgentModel());
 
-  emitThinking("Researching codebase...");
-
-  try {
-    // Build messages with system prompt
-    const messages: BaseMessage[] = [
-      new SystemMessage(PLAN_SYSTEM_PROMPT),
-      ...state.messages,
-    ];
-
-    // If this is the first call, add the user request
-    if (state.messages.length === 0) {
-      messages.push(new HumanMessage(state.userRequest));
-    }
-
-    // Call LLM with plan tools
-    const model = getAgentModel();
-    const response = await callChatModel(messages, planTools, model, true);
-
-    return {
-      messages: [response],
-      status: "researching",
-    };
-  } catch (error: any) {
-    log.error("Research failed", { error: error.message });
-    return {
-      status: "error",
-      error: `Research failed: ${error.message}`,
-    };
-  }
+  return createAgent({
+    model,
+    tools: planTools,
+    systemPrompt: PLAN_SYSTEM_PROMPT,
+    name: "plan-agent",
+  });
 }
-
-/**
- * Node: Execute tool calls
- */
-async function executeToolsNode(
-  state: PlanAgentStateType,
-  config?: RunnableConfig
-): Promise<Partial<PlanAgentStateType>> {
-  log.nodeStart("plan/executeTools", {});
-
-  const lastMessage = state.messages[state.messages.length - 1];
-  const toolCalls = AIMessage.isInstance(lastMessage) ? lastMessage.tool_calls : undefined;
-
-  if (!toolCalls || toolCalls.length === 0) {
-    return {};
-  }
-
-  // Check for ExitPlanMode tool call
-  const exitCall = toolCalls.find(tc => tc.name === "ExitPlanMode");
-  if (exitCall) {
-    log.info("ExitPlanMode tool called, will exit plan mode");
-    // Execute the tool to get the summary
-    emitToolUse("ExitPlanMode", exitCall.args as Record<string, unknown>, exitCall.id || `tool_${Date.now()}`);
-
-    return {
-      shouldExitPlanMode: true,
-      status: "exited",
-      messages: [
-        new ToolMessage({
-          content: "Exiting plan mode. You can now proceed with implementation.",
-          tool_call_id: exitCall.id || `tool_${Date.now()}`,
-          name: "ExitPlanMode",
-        }),
-      ],
-    };
-  }
-
-  // Emit tool use events
-  for (const tc of toolCalls) {
-    emitToolUse(tc.name, tc.args as Record<string, unknown>, tc.id || `tool_${Date.now()}`);
-  }
-
-  try {
-    // Execute tools
-    const result = await toolNode.invoke({ messages: [lastMessage] }, config);
-
-    // Emit tool results
-    for (const msg of result.messages) {
-      emitToolResult(
-        msg.name || "tool",
-        typeof msg.content === "string" ? msg.content : JSON.stringify(msg.content),
-        msg.tool_call_id || `result_${Date.now()}`
-      );
-    }
-
-    return {
-      messages: result.messages,
-    };
-  } catch (error: any) {
-    log.error("Tool execution failed", { error: error.message });
-    return {
-      status: "error",
-      error: `Tool execution failed: ${error.message}`,
-    };
-  }
-}
-
-/**
- * Node: Finalize plan mode
- */
-async function finalizeNode(
-  state: PlanAgentStateType,
-  _config?: RunnableConfig
-): Promise<Partial<PlanAgentStateType>> {
-  log.nodeStart("plan/finalize", { status: state.status, shouldExit: state.shouldExitPlanMode });
-
-  if (state.shouldExitPlanMode) {
-    // Restore previous mode
-    const previousMode = state.previousMode || "default";
-    setPermissionMode(previousMode as any);
-    log.info("Restored previous permission mode", { mode: previousMode });
-
-    emitResponse("Exited plan mode. Ready for implementation.");
-    emitDone();
-
-    return {
-      status: "exited",
-    };
-  }
-
-  // Continue in plan mode
-  return {};
-}
-
-// ============ Conditional Edges ============
-
-/**
- * Determine routing after research
- */
-function shouldExecuteTools(state: PlanAgentStateType): "executeTools" | "finalize" | "error" {
-  if (state.status === "error") {
-    return "error";
-  }
-
-  const lastMessage = state.messages[state.messages.length - 1];
-  const toolCalls = AIMessage.isInstance(lastMessage) ? lastMessage.tool_calls : undefined;
-
-  if (toolCalls && toolCalls.length > 0) {
-    log.conditionalEdge("research", "shouldExecuteTools", "executeTools");
-    return "executeTools";
-  }
-
-  log.conditionalEdge("research", "shouldExecuteTools", "finalize");
-  return "finalize";
-}
-
-/**
- * After tool execution, continue or finalize
- */
-function afterToolExecution(state: PlanAgentStateType): "research" | "finalize" {
-  // If exiting plan mode, go to finalize
-  if (state.shouldExitPlanMode) {
-    log.conditionalEdge("executeTools", "afterToolExecution", "finalize");
-    return "finalize";
-  }
-
-  // Continue research
-  log.conditionalEdge("executeTools", "afterToolExecution", "research");
-  return "research";
-}
-
-// ============ Graph Construction ============
-
-/**
- * Build the Plan Agent graph
- */
-function buildPlanAgentGraph() {
-  const graph = new StateGraph(PlanAgentState)
-    .addNode("research", researchNode)
-    .addNode("executeTools", executeToolsNode)
-    .addNode("finalize", finalizeNode)
-
-    .addEdge(START, "research")
-    .addConditionalEdges("research", shouldExecuteTools, {
-      executeTools: "executeTools",
-      finalize: "finalize",
-      error: "finalize",
-    })
-    .addConditionalEdges("executeTools", afterToolExecution, {
-      research: "research",
-      finalize: "finalize",
-    })
-    .addEdge("finalize", END);
-
-  return graph.compile();
-}
-
-// Compile the graph once
-const planAgentGraph = buildPlanAgentGraph();
 
 // ============ Public API ============
 
@@ -419,29 +159,65 @@ export async function runPlanAgent(userRequest: string, previousMode?: string): 
   log.info("Starting plan agent", { userRequest: userRequest.slice(0, 100) });
 
   try {
-    const result = await planAgentGraph.invoke({
-      userRequest,
-      previousMode: previousMode || "default",
+    emitThinking("Researching codebase...");
+
+    const agent = buildPlanAgent();
+
+    const result = await agent.invoke({
+      messages: [
+        {
+          role: "user",
+          content: userRequest,
+        },
+      ],
     });
 
-    if (result.status === "error") {
+    // Check if ExitPlanMode was called by examining tool messages
+    const messages = result.messages || [];
+    let exited = false;
+
+    for (const msg of messages) {
+      if (msg.name === "ExitPlanMode" || (typeof msg.content === "string" && msg.content.includes("exit_plan_mode"))) {
+        exited = true;
+        break;
+      }
+    }
+
+    if (exited) {
+      // Restore previous permission mode
+      const restoreMode = previousMode || "default";
+      setPermissionMode(restoreMode as any);
+      log.info("Restored previous permission mode", { mode: restoreMode });
+
+      emitResponse("Exited plan mode. Ready for implementation.");
+      emitDone();
+
       return {
-        success: false,
-        message: result.error || "Unknown error occurred",
-        exited: false,
+        success: true,
+        message: "Plan mode completed. Ready for implementation.",
+        exited: true,
       };
     }
 
+    // Extract last AI response for the plan content
+    const lastAIMsg = [...messages].reverse().find(
+      (m: any) => m._getType?.() === "ai" || m.constructor?.name === "AIMessage"
+    );
+    const planContent = lastAIMsg
+      ? (typeof lastAIMsg.content === "string" ? lastAIMsg.content : String(lastAIMsg.content))
+      : undefined;
+
+    emitDone();
+
     return {
       success: true,
-      message: result.shouldExitPlanMode
-        ? "Plan mode completed. Ready for implementation."
-        : "Research completed.",
-      planContent: result.planContent || undefined,
-      exited: result.shouldExitPlanMode,
+      message: "Research completed.",
+      planContent,
+      exited: false,
     };
   } catch (error: any) {
     log.error("Plan agent failed", { error: error.message });
+    emitDone();
     return {
       success: false,
       message: `Planning failed: ${error.message}`,
@@ -458,4 +234,4 @@ export function getPlanModeTools() {
 }
 
 // Export for testing
-export { planAgentGraph, PlanAgentState, ExitPlanModeTool };
+export { ExitPlanModeTool };

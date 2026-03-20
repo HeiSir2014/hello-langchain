@@ -42,8 +42,10 @@ src/
 │   ├── permissions.ts      # Permission system
 │   ├── agent/
 │   │   ├── index.ts        # LangGraph StateGraph (agent, tools, confirm, summarize nodes)
-│   │   ├── initAgent.ts    # Init sub-agent for CLAUDE.md generation (LangGraph subgraph)
-│   │   ├── planAgent.ts    # Plan sub-agent for research and planning (LangGraph subgraph)
+│   │   ├── initAgent.ts    # Init agent using LangChain 1.0 createAgent with middleware
+│   │   ├── planAgent.ts    # Plan agent using LangChain 1.0 createAgent (read-only tools)
+│   │   ├── supervisor.ts   # Multi-agent supervisor (researcher + coder coordination)
+│   │   ├── checkpointer.ts # Checkpointer factory (SQLite persistent / MemorySaver fallback)
 │   │   ├── models.ts       # Unified chat model factory for all providers
 │   │   ├── memory.ts       # Token counting, message trimming, summarization
 │   │   └── events.ts       # AgentEventEmitter for UI communication
@@ -152,24 +154,38 @@ User Input → REPL → multiTurnChat() → LangGraph StateGraph
                 agent
 ```
 
-### LangGraph Sub-Agents (Best Practices)
+### Agent Architecture (LangChain 1.0 + LangGraph 1.2)
 
-The project uses LangGraph subgraphs for specialized tasks. Example: **Init Agent** (`src/core/agent/initAgent.ts`):
+The project uses a hybrid approach:
+- **Main agent**: Custom LangGraph `StateGraph` for full control over the agent loop
+- **Sub-agents**: LangChain 1.0 `createAgent` with middleware for simpler ReAct agents
+- **Supervisor**: `@langchain/langgraph-supervisor` for multi-agent coordination
 
+**Init Agent** (`src/core/agent/initAgent.ts`) - Uses `createAgent` from `langchain`:
 ```text
-START → analyze → generate → shouldExecuteTools?
-                                 ↓           ↓
-                          executeTools    finalize → END
-                                 ↓
-                          afterToolExecution?
-                                 ↓        ↓
-                            generate   finalize
+User Request → codebaseContextMiddleware (beforeAgent) → createAgent ReAct Loop → WriteClaudeMd tool → Done
 ```
 
+**Plan Agent** (`src/core/agent/planAgent.ts`) - Uses `createAgent` from `langchain`:
+```text
+User Request → createAgent ReAct Loop (read-only tools) → ExitPlanMode → Done
+```
+
+**Supervisor** (`src/core/agent/supervisor.ts`) - Uses `createSupervisor`:
+```text
+User Request → Supervisor → researcher agent (read-only) ↔ coder agent (read-write)
+```
+
+**Persistence** (`src/core/agent/checkpointer.ts`):
+- SQLite checkpointer (`@langchain/langgraph-checkpoint-sqlite`) for durable state
+- Stored at `~/.yterm/data/checkpoints.db`
+- Falls back to `MemorySaver` if SQLite unavailable
+
 **Key patterns:**
-- **State with Annotation**: Use `Annotation.Root()` for type-safe state management
-- **Specialized tools**: Sub-agents have their own tool sets (e.g., `WriteClaudeMd`, `ReadClaudeMd`)
-- **Conditional edges**: Route based on state (`shouldExecuteTools`, `afterToolExecution`)
+- **Main agent**: `StateGraph` with `Annotation.Root()` for type-safe state management
+- **Sub-agents**: `createAgent` from `langchain` with `createMiddleware` for context injection
+- **Supervisor**: `createSupervisor` with `createReactAgent` worker agents
+- **Checkpointer**: `SqliteSaver` for persistent state across sessions
 - **Event emission**: Communicate with UI via shared event system
 
 ### Event-Driven UI Communication
@@ -196,10 +212,12 @@ Models are created via factory in `src/core/agent/models.ts`:
 
 Provider/model selection priority: CLI args > `~/.yterm/settings.json` > `.env.local` > `.env`.
 
-### Memory Management
+### Memory & Persistence
 
+- **SQLite checkpointer**: Durable state persistence at `~/.yterm/data/checkpoints.db`
+- **Fallback**: `MemorySaver` (in-memory) if SQLite unavailable
 - Token estimation: ~1.5 chars/token for Chinese, ~4 chars/token for English
-- Auto-trim at 70% of model's context window
+- Auto-trim at 92% of model's context window
 - Uses `RemoveMessage` for proper LangGraph message deletion
 - LLM-generated summaries preserve key information when trimming
 - Manual compaction via `/compact` command
@@ -349,6 +367,7 @@ IP-based geolocation (`src/core/tools/location.ts`):
 | `/init` | `/i` | Analyze codebase and generate CLAUDE.md |
 | `/plan` | `/p` | Enter plan mode (read-only research) |
 | `/exit-plan` | `/ep` | Exit plan mode |
+| `/supervisor` | `/sup`, `/multi` | Run multi-agent supervisor (researcher + coder) |
 
 ## Environment Variables
 
