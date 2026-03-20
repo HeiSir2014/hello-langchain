@@ -7,10 +7,11 @@ import {
   PROJECT_DIR_NAMES,
   USER_DIR_NAMES,
 } from "../projectDirs.js";
+import { loadBootstrapMemory } from "../services/memory.js";
 
 // 上下文项接口
 export interface ContextItem {
-  type: "claudeMd" | "todoReminder" | "fileOpened" | "custom";
+  type: "claudeMd" | "todoReminder" | "fileOpened" | "memory" | "custom";
   content: string;
   priority: number; // 越高越靠前
 }
@@ -87,6 +88,20 @@ export function collectContextItems(): ContextItem[] {
       content: claudeMdContext,
       priority: 100,
     });
+  }
+
+  // Memory context (between CLAUDE.md and todo)
+  try {
+    const memoryContext = loadBootstrapMemory("project");
+    if (memoryContext) {
+      items.push({
+        type: "memory",
+        content: `# agentMemory\nPersistent memory from previous sessions:\n\n${memoryContext}`,
+        priority: 90,
+      });
+    }
+  } catch (error: any) {
+    log.warn("Failed to load bootstrap memory for context", { error: error.message });
   }
 
   // Todo 列表上下文

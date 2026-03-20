@@ -11,7 +11,7 @@
  * - Skills can be activated/deactivated at runtime
  */
 
-export type { SkillConfig, SkillLocation, SkillDirectory } from "./types.js";
+export type { SkillConfig, SkillLocation, SkillDirectory, SkillRequirements } from "./types.js";
 export { BUILT_IN_SKILLS } from "./types.js";
 
 export {
@@ -29,6 +29,10 @@ export {
   resetSkillRuntime,
   buildSkillPrompt,
   formatSkillList,
+  checkSkillRequirements,
+  getAlwaysActiveSkills,
+  getUserInvocableSkills,
+  getModelSelectableSkills,
   type SkillContext,
   type SkillResult,
 } from "./runtime.js";

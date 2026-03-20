@@ -227,6 +227,14 @@ function loadSkillFromFile(filePath: string, location: SkillLocation): SkillConf
     // Extract filename as default name
     const filename = filePath.split("/").pop()?.replace(/\.md$/, "") || "unknown";
 
+    // Parse requirements
+    const requires = frontmatter.requires_env || frontmatter.requires_bins
+      ? {
+          env: frontmatter.requires_env,
+          bins: frontmatter.requires_bins,
+        }
+      : undefined;
+
     const skill: SkillConfig = {
       name: frontmatter.name || filename,
       description: frontmatter.description || "",
@@ -239,6 +247,10 @@ function loadSkillFromFile(filePath: string, location: SkillLocation): SkillConf
       readOnly: frontmatter.readOnly || frontmatter.read_only,
       priority: frontmatter.priority || 0,
       tags: frontmatter.tags,
+      requires,
+      always: frontmatter.always,
+      userInvocable: frontmatter.userInvocable || frontmatter.user_invocable,
+      disableModelInvocation: frontmatter.disableModelInvocation || frontmatter.disable_model_invocation,
     };
 
     log.debug("Loaded skill from file", { name: skill.name, path: filePath });

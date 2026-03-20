@@ -48,6 +48,9 @@ import {
   generateTodoWriteHint,
 } from "../context/index.js";
 import {
+  appendDailyLog,
+} from "../services/memory.js";
+import {
   emitThinking,
   emitStreaming,
   emitToolUse,
@@ -597,6 +600,24 @@ const summarizeNode = async (
     log.debug("Not enough messages to summarize (less than 3)");
     log.nodeEnd("summarize", { skipped: true }, Date.now() - startTime);
     return { messages: [], skipNextCheck: true };
+  }
+
+  // Memory flush: save key context to daily log before compaction
+  try {
+    const recentMessages = nonSystemMessages.slice(-10);
+    const contextSnippets = recentMessages
+      .filter(m => typeof m.content === "string" && m.content.length > 0)
+      .map(m => (typeof m.content === "string" ? m.content : "").slice(0, 200))
+      .join("\n");
+    if (contextSnippets.length > 0) {
+      appendDailyLog(
+        `**Auto-saved before compaction**\n\n${contextSnippets.slice(0, 2000)}`,
+        "project"
+      );
+      log.debug("Memory flush: saved context before compaction");
+    }
+  } catch (flushError: any) {
+    log.warn("Memory flush failed", { error: flushError.message });
   }
 
   // 策略：在 LangGraph 流程中生成总结

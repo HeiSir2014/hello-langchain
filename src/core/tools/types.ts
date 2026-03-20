@@ -124,6 +124,20 @@ export const TOOL_METADATA: Record<string, ToolMetadata> = {
     category: "other",
   },
 
+  // Memory tools
+  MemorySave: {
+    isReadOnly: false,
+    isConcurrencySafe: true,
+    needsPermission: false,
+    category: "other",
+  },
+  MemorySearch: {
+    isReadOnly: true,
+    isConcurrencySafe: true,
+    needsPermission: false,
+    category: "search",
+  },
+
   // Plan mode tools
   ExitPlanMode: {
     isReadOnly: false,

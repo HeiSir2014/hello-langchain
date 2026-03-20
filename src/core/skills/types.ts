@@ -12,6 +12,16 @@
 export type SkillLocation = "built-in" | "user" | "project";
 
 /**
+ * Runtime requirements for a skill (OpenClaw-inspired)
+ */
+export interface SkillRequirements {
+  /** Required environment variables (e.g. ["OPENAI_API_KEY"]) */
+  env?: string[];
+  /** Required binaries on PATH (e.g. ["git", "docker"]) */
+  bins?: string[];
+}
+
+/**
  * Skill configuration loaded from markdown frontmatter
  */
 export interface SkillConfig {
@@ -47,6 +57,20 @@ export interface SkillConfig {
 
   /** Tags for categorization */
   tags?: string[];
+
+  // === OpenClaw-inspired metadata ===
+
+  /** Runtime requirements (env vars, binaries) */
+  requires?: SkillRequirements;
+
+  /** Always activate this skill (auto-inject into context) */
+  always?: boolean;
+
+  /** Skill is user-invocable via slash command (e.g. /skill-name) */
+  userInvocable?: boolean;
+
+  /** Prevent the model from activating this skill automatically */
+  disableModelInvocation?: boolean;
 }
 
 /**

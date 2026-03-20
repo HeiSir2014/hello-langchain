@@ -3,6 +3,7 @@ import { Read, Write, Glob, Grep, Edit, LS } from "./file.js";
 import { TodoWrite, getTodos, setTodos, clearTodos, formatTodosForPrompt } from "./todo.js";
 import { WebSearch, WebFetch } from "./web.js";
 import { Location, Weather } from "./location.js";
+import { MemorySave, MemorySearch } from "./memory.js";
 import { ExitPlanMode, SavePlan, ReadPlan, setPreviousModeBeforePlan, getPreviousModeBeforePlan } from "./plan.js";
 import {
   TOOL_METADATA,
@@ -23,6 +24,7 @@ export const allTools = [
   TodoWrite,
   WebSearch, WebFetch,
   Location, Weather,
+  MemorySave, MemorySearch,
   ExitPlanMode, SavePlan, ReadPlan,
 ];
 
@@ -63,7 +65,7 @@ export const readOnlyTools = allTools.filter((t) => isReadOnlyTool(t.name));
 export const permissionRequiredTools = allTools.filter((t) => needsPermission(t.name));
 
 // 按名称导出
-export { Bash, BashOutput, KillShell, Read, Write, Glob, Grep, Edit, LS, TodoWrite, WebSearch, WebFetch, Location, Weather };
+export { Bash, BashOutput, KillShell, Read, Write, Glob, Grep, Edit, LS, TodoWrite, WebSearch, WebFetch, Location, Weather, MemorySave, MemorySearch };
 export { ExitPlanMode, SavePlan, ReadPlan, setPreviousModeBeforePlan, getPreviousModeBeforePlan };
 
 // 导出 todo 辅助函数
@@ -97,6 +99,8 @@ export const toolDescriptions = [
   { name: "WebFetch", description: "Fetch and analyze content from a URL", readOnly: true },
   { name: "Location", description: "Get current location based on IP address", readOnly: true },
   { name: "Weather", description: "Get weather information for a location in China", readOnly: true },
+  { name: "MemorySave", description: "Save important information to persistent memory (MEMORY.md or daily log)", readOnly: false },
+  { name: "MemorySearch", description: "Search across all persistent memory files", readOnly: true },
   { name: "ExitPlanMode", description: "Exit plan mode and return to normal mode (plan mode only)", readOnly: false, planModeOnly: true },
   { name: "SavePlan", description: "Save implementation plan to a markdown file", readOnly: false },
   { name: "ReadPlan", description: "Read an existing plan file", readOnly: true },

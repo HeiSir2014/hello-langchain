@@ -11,10 +11,11 @@
  * - Skills can be composed (one skill can invoke another)
  */
 
-import type { SkillConfig } from "./types.js";
+import type { SkillConfig, SkillRequirements } from "./types.js";
 import { getSkill, loadAllSkills } from "./loader.js";
 import { log } from "../../logger.js";
 import type { BaseMessage } from "@langchain/core/messages";
+import { execSync } from "child_process";
 
 /**
  * Skill execution context
@@ -294,6 +295,72 @@ ${skill.systemPrompt}
 ${userRequest}
 
 Please complete this request following the skill guidelines above.`;
+}
+
+/**
+ * Check if a skill's runtime requirements are met
+ */
+export function checkSkillRequirements(skill: SkillConfig): { met: boolean; missing: string[] } {
+  const missing: string[] = [];
+
+  if (!skill.requires) {
+    return { met: true, missing };
+  }
+
+  // Check environment variables
+  if (skill.requires.env) {
+    for (const envVar of skill.requires.env) {
+      if (!process.env[envVar]) {
+        missing.push(`env:${envVar}`);
+      }
+    }
+  }
+
+  // Check binaries
+  if (skill.requires.bins) {
+    for (const bin of skill.requires.bins) {
+      try {
+        execSync(`which ${bin}`, { stdio: "ignore" });
+      } catch {
+        missing.push(`bin:${bin}`);
+      }
+    }
+  }
+
+  return { met: missing.length === 0, missing };
+}
+
+/**
+ * Get skills marked as "always" active (auto-inject into context)
+ */
+export function getAlwaysActiveSkills(): SkillConfig[] {
+  const skills = loadAllSkills();
+  return skills.filter((s) => {
+    if (!s.always) return false;
+    // Only include if requirements are met
+    const { met } = checkSkillRequirements(s);
+    return met;
+  });
+}
+
+/**
+ * Get user-invocable skills (available as slash commands)
+ */
+export function getUserInvocableSkills(): SkillConfig[] {
+  const skills = loadAllSkills();
+  return skills.filter((s) => s.userInvocable);
+}
+
+/**
+ * Get skills available for model auto-selection
+ */
+export function getModelSelectableSkills(): SkillConfig[] {
+  const skills = loadAllSkills();
+  return skills.filter((s) => {
+    if (s.disableModelInvocation) return false;
+    const { met } = checkSkillRequirements(s);
+    return met;
+  });
 }
 
 /**
