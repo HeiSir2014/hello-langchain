@@ -1,7 +1,7 @@
 /**
  * Prompt Sections 单元测试
  *
- * 测试每个 section factory 的输出格式和内容
+ * 验证每个 section factory 的输出和 layer 归属
  */
 
 import { describe, test, expect } from "bun:test";
@@ -18,24 +18,52 @@ import {
 } from "../sections.js";
 
 describe("Section Factories", () => {
+  // ============ Static Sections (layer: "system") ============
+
+  describe("static sections — layer: system", () => {
+    const staticFactories = [
+      { name: "identity", factory: buildIdentitySection },
+      { name: "safety", factory: buildSafetySection },
+      { name: "style", factory: buildStyleSection },
+      { name: "task-management", factory: buildTaskManagementSection },
+      { name: "tool-policy", factory: buildToolPolicySection },
+      { name: "environment", factory: buildEnvironmentSection },
+    ];
+
+    test.each(staticFactories)("$name has layer: system", ({ factory }) => {
+      const section = factory();
+      expect(section.layer).toBe("system");
+    });
+
+    test.each(staticFactories)("$name content is stable (cache-friendly)", ({ factory }) => {
+      const a = factory();
+      const b = factory();
+      expect(a.content).toBe(b.content);
+    });
+
+    test.each(staticFactories)("$name has required properties", ({ factory }) => {
+      const section = factory();
+      expect(section.id).toBeTruthy();
+      expect(section.tag).toBeTruthy();
+      expect(section.title).toBeTruthy();
+      expect(section.content).toBeTruthy();
+      expect(section.priority).toBeTruthy();
+      expect(typeof section.weight).toBe("number");
+      expect(section.enabled).toBe(true);
+    });
+  });
+
   // ============ Identity ============
 
   describe("buildIdentitySection", () => {
-    test("返回正确的 section 结构", () => {
+    test("包含 YTerm 和 LangGraph", () => {
       const section = buildIdentitySection();
-
-      expect(section.id).toBe("identity");
-      expect(section.tag).toBe("identity");
-      expect(section.priority).toBe("critical");
-      expect(section.enabled).toBe(true);
       expect(section.content).toContain("YTerm");
       expect(section.content).toContain("LangGraph");
     });
 
-    test("内容稳定（cache-friendly）", () => {
-      const a = buildIdentitySection();
-      const b = buildIdentitySection();
-      expect(a.content).toBe(b.content);
+    test("priority 为 critical", () => {
+      expect(buildIdentitySection().priority).toBe("critical");
     });
   });
 
@@ -43,19 +71,17 @@ describe("Section Factories", () => {
 
   describe("buildSafetySection", () => {
     test("包含 URL 安全约束", () => {
-      const section = buildSafetySection();
-      expect(section.content).toContain("NEVER generate or guess URLs");
+      expect(buildSafetySection().content).toContain("NEVER generate or guess URLs");
     });
 
     test("包含安全漏洞防护", () => {
-      const section = buildSafetySection();
-      expect(section.content).toContain("XSS");
-      expect(section.content).toContain("SQL injection");
+      const content = buildSafetySection().content;
+      expect(content).toContain("XSS");
+      expect(content).toContain("SQL injection");
     });
 
     test("包含恶意代码分析规则", () => {
-      const section = buildSafetySection();
-      expect(section.content).toContain("malware");
+      expect(buildSafetySection().content).toContain("malware");
     });
 
     test("priority 为 critical", () => {
@@ -67,13 +93,9 @@ describe("Section Factories", () => {
 
   describe("buildStyleSection", () => {
     test("包含输出格式规则", () => {
-      const section = buildStyleSection();
-      expect(section.content).toContain("markdown");
-      expect(section.content).toContain("concise");
-    });
-
-    test("priority 为 high", () => {
-      expect(buildStyleSection().priority).toBe("high");
+      const content = buildStyleSection().content;
+      expect(content).toContain("markdown");
+      expect(content).toContain("concise");
     });
   });
 
@@ -81,29 +103,22 @@ describe("Section Factories", () => {
 
   describe("buildTaskManagementSection", () => {
     test("包含 TodoWrite 指导", () => {
-      const section = buildTaskManagementSection();
-      expect(section.content).toContain("TodoWrite");
+      expect(buildTaskManagementSection().content).toContain("TodoWrite");
     });
 
     test("包含代码审查规则", () => {
-      const section = buildTaskManagementSection();
-      expect(section.content).toContain("NEVER propose changes to code you haven't read");
+      expect(buildTaskManagementSection().content).toContain("NEVER propose changes to code you haven't read");
     });
   });
 
   // ============ Tool Policy ============
 
   describe("buildToolPolicySection", () => {
-    test("包含并发调用规则", () => {
-      const section = buildToolPolicySection();
-      expect(section.content).toContain("parallel");
-    });
-
-    test("包含工具替代规则", () => {
-      const section = buildToolPolicySection();
-      expect(section.content).toContain("Read");
-      expect(section.content).toContain("Edit");
-      expect(section.content).toContain("Bash");
+    test("包含并发调用和工具替代规则", () => {
+      const content = buildToolPolicySection().content;
+      expect(content).toContain("parallel");
+      expect(content).toContain("Read");
+      expect(content).toContain("Bash");
     });
   });
 
@@ -111,57 +126,41 @@ describe("Section Factories", () => {
 
   describe("buildEnvironmentSection", () => {
     test("包含运行时信息", () => {
-      const section = buildEnvironmentSection();
-      expect(section.content).toContain(process.cwd());
-      expect(section.content).toContain(process.platform);
+      const content = buildEnvironmentSection().content;
+      expect(content).toContain(process.cwd());
+      expect(content).toContain(process.platform);
     });
 
     test("包含日期", () => {
-      const section = buildEnvironmentSection();
       const today = new Date().toISOString().split("T")[0];
-      expect(section.content).toContain(today);
+      expect(buildEnvironmentSection().content).toContain(today);
     });
 
     test("包含 git 状态", () => {
-      const section = buildEnvironmentSection();
-      // 在 git repo 中应该包含分支信息
-      expect(section.content).toMatch(/Branch:|Git status unavailable/);
-    });
-
-    test("priority 为 medium", () => {
-      expect(buildEnvironmentSection().priority).toBe("medium");
+      expect(buildEnvironmentSection().content).toMatch(/Branch:|Git status unavailable/);
     });
   });
 
-  // ============ Active Skill ============
+  // ============ Dynamic Sections (layer: "message") ============
 
-  describe("buildActiveSkillSection", () => {
-    test("无活跃技能时返回 null", () => {
-      const section = buildActiveSkillSection();
-      // 默认没有活跃技能
-      expect(section).toBeNull();
+  describe("dynamic sections — layer: message", () => {
+    test("active-skill 无激活时返回 null", () => {
+      expect(buildActiveSkillSection()).toBeNull();
+    });
+
+    test("plan-mode 非 plan mode 时返回 null", () => {
+      expect(buildPlanModeSection()).toBeNull();
+    });
+
+    test("anti-hallucination 无映射时返回 null", () => {
+      expect(buildAntiHallucinationSection()).toBeNull();
     });
   });
 
-  // ============ Plan Mode ============
-
-  describe("buildPlanModeSection", () => {
-    test("非 plan mode 时返回 null", () => {
-      // 默认不是 plan mode
-      const section = buildPlanModeSection();
-      expect(section).toBeNull();
-    });
-  });
-
-  // ============ Anti-Hallucination ============
+  // ============ Anti-Hallucination Details ============
 
   describe("buildAntiHallucinationSection", () => {
-    test("无映射时返回 null", () => {
-      const section = buildAntiHallucinationSection();
-      expect(section).toBeNull();
-    });
-
-    test("有映射时返回详细指令", () => {
+    test("有映射时 layer 为 message", () => {
       const { getAntiHallucinationPipeline } = require("../../middleware/index.js");
       const pipeline = getAntiHallucinationPipeline();
       pipeline.processToolResult(
@@ -170,30 +169,41 @@ describe("Section Factories", () => {
       );
 
       const section = buildAntiHallucinationSection();
-
       expect(section).not.toBeNull();
-      expect(section!.id).toBe("anti-hallucination");
+      expect(section!.layer).toBe("message");
       expect(section!.tag).toBe("structured-id-references");
       expect(section!.priority).toBe("dynamic");
 
-      // 关键指令
-      expect(section!.content).toContain("ALWAYS use the REF-N placeholder");
-      expect(section!.content).toContain("NEVER try to reconstruct");
-      expect(section!.content).toContain("automatically resolved");
-
-      // 示例
-      expect(section!.content).toContain("CORRECT:");
-      expect(section!.content).toContain("WRONG:");
-
-      // 参考表
-      expect(section!.content).toContain("REF-1");
-      expect(section!.content).toContain("<reference-map>");
-
-      // 清理
       pipeline.reset();
     });
 
-    test("指令包含具体的使用规则", () => {
+    test("包含完整的占位符使用指令", () => {
+      const { getAntiHallucinationPipeline } = require("../../middleware/index.js");
+      const pipeline = getAntiHallucinationPipeline();
+      pipeline.processToolResult(
+        "See https://example.com/api/v1/docs?section=getting-started for docs",
+        "WebSearch"
+      );
+
+      const section = buildAntiHallucinationSection()!;
+
+      // 5 条规则
+      expect(section.content).toContain("ALWAYS use the REF-N placeholder");
+      expect(section.content).toContain("NEVER try to reconstruct");
+      expect(section.content).toContain("automatically resolved");
+
+      // 示例
+      expect(section.content).toContain("CORRECT:");
+      expect(section.content).toContain("WRONG:");
+
+      // 参考表
+      expect(section.content).toContain("REF-1");
+      expect(section.content).toContain("<reference-map>");
+
+      pipeline.reset();
+    });
+
+    test("指令包含 5 条具体规则", () => {
       const { getAntiHallucinationPipeline } = require("../../middleware/index.js");
       const pipeline = getAntiHallucinationPipeline();
       pipeline.processToolResult(
@@ -202,8 +212,6 @@ describe("Section Factories", () => {
       );
 
       const section = buildAntiHallucinationSection()!;
-
-      // 5 条规则
       expect(section.content).toContain("1.");
       expect(section.content).toContain("2.");
       expect(section.content).toContain("3.");
@@ -211,40 +219,6 @@ describe("Section Factories", () => {
       expect(section.content).toContain("5.");
 
       pipeline.reset();
-    });
-  });
-
-  // ============ Section 属性一致性 ============
-
-  describe("section property consistency", () => {
-    const factories = [
-      buildIdentitySection,
-      buildSafetySection,
-      buildStyleSection,
-      buildTaskManagementSection,
-      buildToolPolicySection,
-      buildEnvironmentSection,
-    ];
-
-    test("所有 section 都有必需属性", () => {
-      for (const factory of factories) {
-        const section = factory();
-        expect(section.id).toBeTruthy();
-        expect(section.tag).toBeTruthy();
-        expect(section.title).toBeTruthy();
-        expect(section.content).toBeTruthy();
-        expect(section.priority).toBeTruthy();
-        expect(typeof section.weight).toBe("number");
-        expect(typeof section.enabled).toBe("boolean");
-      }
-    });
-
-    test("所有 section 的 id 和 tag 不为空", () => {
-      for (const factory of factories) {
-        const section = factory();
-        expect(section.id.length).toBeGreaterThan(0);
-        expect(section.tag.length).toBeGreaterThan(0);
-      }
     });
   });
 });

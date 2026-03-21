@@ -56,6 +56,7 @@ import {
 } from "../middleware/index.js";
 import {
   buildSystemPrompt,
+  buildDynamicInjection,
 } from "../prompt/index.js";
 import {
   emitThinking,
@@ -239,16 +240,25 @@ const agentNode = async (
     messagesWithSystem = [new SystemMessage(systemPrompt), ...messagesWithSystem];
   }
 
-  // 注入上下文到最后一条用户消息（CLAUDE.md、todo 列表等）
-  // 注：防幻觉参考表现在由 prompt/sections.ts 的 buildAntiHallucinationSection 在系统提示中注入
+  // 注入上下文到最后一条用户消息
+  // 两部分内容合并注入：
+  // 1. CLAUDE.md、todo 列表、memory 等上下文
+  // 2. 动态 prompt sections（技能覆盖、模式指令、防幻觉参考表）
+  //    这些不能放 system prompt，否则会破坏 prompt cache 前缀匹配
   const contextInjection = generateContextInjection();
-  if (contextInjection) {
+  const dynamicPromptInjection = buildDynamicInjection();
+  const fullInjection = [contextInjection, dynamicPromptInjection].filter(Boolean).join("\n\n");
+
+  if (fullInjection) {
     for (let i = messagesWithSystem.length - 1; i >= 0; i--) {
       const msg = messagesWithSystem[i];
       if (msg instanceof HumanMessage) {
         const originalContent = typeof msg.content === "string" ? msg.content : String(msg.content);
-        messagesWithSystem[i] = new HumanMessage(originalContent + "\n" + contextInjection);
-        log.debug("Context injected into user message", { contextLength: contextInjection.length });
+        messagesWithSystem[i] = new HumanMessage(originalContent + "\n" + fullInjection);
+        log.debug("Context injected into user message", {
+          contextLength: fullInjection.length,
+          hasDynamicPrompt: !!dynamicPromptInjection,
+        });
         break;
       }
     }

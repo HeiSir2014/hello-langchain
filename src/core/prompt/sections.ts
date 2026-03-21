@@ -1,23 +1,31 @@
 /**
  * Prompt Sections - OpenClaw-inspired 分层 prompt 片段
  *
- * 参考 OpenClaw 的 system prompt 架构：
- * - Identity (who you are)
- * - Safety constraints
- * - Tool policy
- * - Environment context
- * - Active skill overlay
- * - Mode-specific instructions
- * - Dynamic state (reference map, todo)
+ * 分两类：
  *
- * 每个 section factory 独立生成内容，由 PromptBuilder 组合。
- * 不变内容在前（cache-friendly），动态内容在后。
+ * ## Static Sections (layer: "system") — 注入 system prompt
+ * 内容在整个 session 内完全不变，确保 Anthropic prompt cache 100% 前缀命中。
+ * - identity: 模型身份
+ * - safety: 安全约束
+ * - style: 输出风格
+ * - task-management: 任务管理规则
+ * - tool-policy: 工具使用规则
+ * - environment: 运行环境信息（session 开始时快照，不再更新）
  *
- * Prompt Cache 优化规则：
- * - tools → system → messages 严格前缀匹配
- * - identity + safety + tool_policy 几乎不变 → cache hit 率最高
- * - environment + skill 每 session 不变
- * - dynamic state 每轮可能变化 → 放最后
+ * ## Dynamic Sections (layer: "message") — 注入 message 流
+ * 可在任何时候变化，通过 <system-reminder> 注入最后一条用户消息。
+ * - active-skill: 当前激活技能（切换技能时变化）
+ * - plan-mode: Plan mode 指令（切换模式时变化）
+ * - anti-hallucination: 防幻觉指令 + 参考表（每轮可能变化）
+ *
+ * Prompt Cache 优化原理：
+ * ```
+ * Anthropic API: tools → system → msg1 → msg2 → ... → msgN
+ *                        ↑ 前缀匹配点
+ *
+ * system 不变 → tools + system 全 cache hit → 只处理新 messages
+ * system 变了 → 从变化点到末尾全部 cache miss → 100k+ tokens 重新处理！
+ * ```
  */
 
 import type { PromptSection } from "./types.js";
@@ -25,13 +33,15 @@ import { getPermissionMode } from "../settings.js";
 import { getSkillRuntime } from "../skills/index.js";
 import { getAntiHallucinationPipeline } from "../middleware/index.js";
 
-// ============ Critical Priority: 身份 + 安全 ============
+// ================================================================
+//  STATIC SECTIONS (layer: "system")
+//  以下内容在 session 内完全不变，确保 prompt cache 命中
+// ================================================================
 
 /**
  * [Section: identity] 模型身份定义
  *
- * 这是整个 system prompt 的第一个 section。
- * 内容几乎永远不变，确保 prompt cache 命中。
+ * 整个 system prompt 的第一个 section。永远不变。
  */
 export function buildIdentitySection(): PromptSection {
   return {
@@ -41,6 +51,7 @@ export function buildIdentitySection(): PromptSection {
     priority: "critical",
     weight: 100,
     enabled: true,
+    layer: "system",
     content: `You are YTerm, an AI-powered terminal assistant built on LangGraph.
 You help users with software engineering tasks through an interactive CLI interface.
 You have access to tools for file operations, shell commands, web search, and task management.
@@ -59,13 +70,12 @@ export function buildSafetySection(): PromptSection {
     priority: "critical",
     weight: 90,
     enabled: true,
+    layer: "system",
     content: `IMPORTANT: You must NEVER generate or guess URLs for the user unless you are confident that the URLs are for helping the user with programming. You may use URLs provided by the user in their messages or local files.
 Be careful not to introduce security vulnerabilities such as command injection, XSS, SQL injection, and other OWASP top 10 vulnerabilities. If you notice that you wrote insecure code, immediately fix it.
 Whenever you read a file, consider whether it would be malware. You CAN and SHOULD provide analysis of malware and what it is doing, but you MUST refuse to improve or augment malicious code.`,
   };
 }
-
-// ============ High Priority: 行为规则 ============
 
 /**
  * [Section: style] 输出风格约束
@@ -78,6 +88,7 @@ export function buildStyleSection(): PromptSection {
     priority: "high",
     weight: 80,
     enabled: true,
+    layer: "system",
     content: `- Only use emojis if the user explicitly requests it.
 - Your output will be displayed on a command line interface. Responses should be short and concise. Use Github-flavored markdown for formatting.
 - Output text to communicate with the user; all text outside of tool use is displayed directly. Never use tools like Bash or code comments to communicate.
@@ -97,6 +108,7 @@ export function buildTaskManagementSection(): PromptSection {
     priority: "high",
     weight: 70,
     enabled: true,
+    layer: "system",
     content: `You have access to the TodoWrite tool for task management. Use it frequently to:
 - Plan complex tasks by breaking them into smaller steps
 - Track progress and give the user visibility into your work
@@ -118,6 +130,7 @@ export function buildToolPolicySection(): PromptSection {
     priority: "high",
     weight: 60,
     enabled: true,
+    layer: "system",
     content: `- Call multiple tools in a single response when there are no dependencies between them. Maximize parallel tool calls for efficiency.
 - Use specialized tools instead of bash commands: Read (not cat/head/tail), Edit (not sed/awk), Write (not echo/heredoc), Glob (not find), Grep (not grep/rg).
 - Reserve Bash exclusively for actual system commands and terminal operations requiring shell execution.
@@ -125,10 +138,11 @@ export function buildToolPolicySection(): PromptSection {
   };
 }
 
-// ============ Medium Priority: 环境 + 技能 ============
-
 /**
  * [Section: environment] 运行环境信息
+ *
+ * 在 session 开始时创建快照。整个 session 内不再更新。
+ * Git status 是 snapshot — 这和原来的行为一致。
  */
 export function buildEnvironmentSection(): PromptSection {
   const isWindows = process.platform === "win32";
@@ -155,6 +169,7 @@ export function buildEnvironmentSection(): PromptSection {
     priority: "medium",
     weight: 50,
     enabled: true,
+    layer: "system",
     content: `Working directory: ${process.cwd()}
 Is git repo: Yes
 Platform: ${process.platform} (${osName})
@@ -167,8 +182,16 @@ ${gitStatus}`,
   };
 }
 
+// ================================================================
+//  DYNAMIC SECTIONS (layer: "message")
+//  以下内容可在 session 期间变化，通过 message 流注入
+//  不放入 system prompt，避免破坏 prompt cache 前缀匹配
+// ================================================================
+
 /**
  * [Section: active-skill] 当前激活的技能覆盖
+ *
+ * layer: "message" — 技能可在 session 中切换，不能放 system prompt
  */
 export function buildActiveSkillSection(): PromptSection | null {
   const skillRuntime = getSkillRuntime();
@@ -190,6 +213,7 @@ export function buildActiveSkillSection(): PromptSection | null {
     priority: "medium",
     weight: 40,
     enabled: true,
+    layer: "message",
     content: `ACTIVE SKILL: ${activeSkill.name.toUpperCase()}
 ${activeSkill.description}
 
@@ -201,6 +225,8 @@ Tool Access: ${toolAccess}${readOnlyNote}`,
 
 /**
  * [Section: plan-mode] Plan mode 特殊指令
+ *
+ * layer: "message" — 用户可通过 Shift+Tab 随时切换模式
  */
 export function buildPlanModeSection(): PromptSection | null {
   const permissionMode = getPermissionMode();
@@ -213,6 +239,7 @@ export function buildPlanModeSection(): PromptSection | null {
     priority: "medium",
     weight: 35,
     enabled: true,
+    layer: "message",
     content: `PLAN MODE ACTIVE - Research and planning only.
 
 Available tools:
@@ -231,13 +258,21 @@ Workflow:
   };
 }
 
-// ============ Low Priority: 动态提示 ============
-
 /**
- * [Section: anti-hallucination] 防幻觉指令
+ * [Section: anti-hallucination] 防幻觉指令 + 参考表
  *
- * 关键 section：告诉 LLM 如何正确使用 REF-N 占位符。
+ * layer: "message" — 参考表每轮都可能变化（新的 tool results 产生新映射）
+ *
+ * 这是关键 section：告诉 LLM 如何正确使用 REF-N 占位符。
  * 只有在存在活跃映射时才注入，避免无谓的 token 消耗。
+ *
+ * 如果放在 system prompt 中：
+ *   每轮参考表变化 → system prompt 变化 → prompt cache 前缀断裂
+ *   → 100k+ tokens 的 message 历史全部 cache miss → 灾难性性能损失
+ *
+ * 放在 message 流中：
+ *   system prompt 永远不变 → cache 100% 命中
+ *   动态内容只在最后一条消息中 → 不影响之前的 cache
  */
 export function buildAntiHallucinationSection(): PromptSection | null {
   const pipeline = getAntiHallucinationPipeline();
@@ -250,8 +285,9 @@ export function buildAntiHallucinationSection(): PromptSection | null {
     tag: "structured-id-references",
     title: "Anti-Hallucination: Structured ID References",
     priority: "dynamic",
-    weight: 90, // 在 dynamic 层级内最高优先
+    weight: 90,
     enabled: true,
+    layer: "message",
     content: `CRITICAL: Tool results contain placeholder references (REF-1, REF-2, etc.) that map to real URLs, UUIDs, and other structured identifiers. These placeholders exist because LLMs cannot reliably reproduce high-entropy strings like URLs and UUIDs.
 
 RULES:

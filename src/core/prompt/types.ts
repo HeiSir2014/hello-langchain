@@ -4,17 +4,29 @@
  * OpenClaw-inspired 分层 prompt 架构的类型定义。
  *
  * 设计原则：
- * - 每个 section 是独立的、可组合的 prompt 片段
- * - 严格的优先级排序确保 prompt cache 命中率最大化
+ * - System prompt 必须 100% 静态 — 确保 Anthropic prompt cache 前缀完全命中
+ * - 动态内容（技能、模式、防幻觉参考表）通过 message-level injection 注入
  * - XML 标签包裹每个 section，便于模型理解结构边界
- * - 不变内容（identity, policy）置于最前，高变内容（dynamic state）置于最后
+ *
+ * Prompt Cache 前缀匹配机制：
+ * ```
+ * [tools] → [system prompt] → [msg1] → [msg2] → ... → [msgN]
+ *            ↑ 如果这里变了，后面所有 messages 全部 cache miss！
+ *
+ * 正确做法：system prompt 永不变，动态内容注入 message 流
+ * ```
  */
+
+/** Section 归属层 */
+export type SectionLayer =
+  | "system"     // 注入 system prompt（必须静态不变）
+  | "message";   // 注入 message 流（可动态变化）
 
 /** Prompt section 优先级层级 */
 export type SectionPriority =
   | "critical"    // 身份、安全约束 — 永远在最前面
   | "high"        // 核心行为规则
-  | "medium"      // 环境信息、技能
+  | "medium"      // 环境信息
   | "low"         // 动态状态、提示
   | "dynamic";    // 每轮变化的内容（参考表、todo）
 
@@ -34,6 +46,12 @@ export interface PromptSection {
   weight: number;
   /** 是否启用（可动态关闭） */
   enabled: boolean;
+  /**
+   * 归属层：决定 section 注入到哪里
+   * - "system": 注入 system prompt（内容必须在整个 session 内完全不变）
+   * - "message": 注入 message 流的 <system-reminder>（可以动态变化）
+   */
+  layer: SectionLayer;
 }
 
 /** Prompt builder 配置 */

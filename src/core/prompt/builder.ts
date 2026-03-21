@@ -1,22 +1,27 @@
 /**
  * Prompt Builder - OpenClaw-inspired 分层 prompt 组装器
  *
- * 设计理念（参考 OpenClaw system prompt 架构）：
+ * 核心设计：严格区分 static / dynamic 两层
  *
- * 1. **分层**: 每个 section 是独立的、可测试的单元
- * 2. **优先级排序**: critical → high → medium → low → dynamic
- *    不变内容在前确保 prompt cache 命中，动态内容在后
- * 3. **XML 标签**: 每个 section 用 XML 标签包裹，帮助模型理解结构边界
- * 4. **可组合**: section 可动态启用/禁用，技能覆盖只添加额外 section
- * 5. **Cache-friendly**: 排序稳定，section ID 唯一，相同配置产生相同输出
+ * ```
+ * Anthropic Cache 前缀匹配：
+ *   tools → system prompt → msg1 → msg2 → ... → msgN
+ *           ↑ 如果这里变了，后面全部 cache miss
  *
- * Prompt Cache 优化（对应 Anthropic 的前缀匹配机制）：
+ * 正确架构：
+ *   System Prompt (100% STATIC — 整个 session 不变):
+ *     [identity] [safety] [style] [task] [tool-policy] [environment]
+ *     → prompt cache 前缀完全命中 → 只需处理新 messages
+ *
+ *   Message Injection (DYNAMIC — 每轮可变):
+ *     [active-skill] [plan-mode] [anti-hallucination]
+ *     → 通过 <system-reminder> 注入最后一条用户消息
+ *     → 不影响 system prompt 的 cache 前缀
  * ```
- * [identity] [safety] [style] [task] [tool-policy]  ← 几乎不变，cache hit
- * [environment]                                       ← 每 session 不变
- * [active-skill] [plan-mode]                          ← 模式切换时变化
- * [anti-hallucination]                                ← 每轮可能变化
- * ```
+ *
+ * 长上下文场景 (100k+ tokens) 的影响：
+ * - system prompt 不变: 每轮只处理新增的 ~2k tokens → 快速、低成本
+ * - system prompt 变了: 每轮重新处理 100k+ tokens → 慢、高成本
  */
 
 import {
@@ -43,7 +48,7 @@ import { log } from "../../logger.js";
 const DEFAULT_CONFIG: PromptBuilderConfig = {
   useXmlTags: true,
   useSeparators: false,
-  maxLength: 0, // 不限制
+  maxLength: 0,
 };
 
 // ============ PromptBuilder ============
@@ -63,25 +68,21 @@ export class PromptBuilder {
   /**
    * 注册默认的 section factories
    *
-   * 按 OpenClaw 的分层顺序：
-   * identity → safety → style → task → tools → env → skill → mode → dynamic
+   * Static (system prompt): identity → safety → style → task → tools → env
+   * Dynamic (message injection): active-skill → plan-mode → anti-hallucination
    */
   private registerDefaultSections(): void {
-    // Critical: 身份 + 安全（几乎永远不变）
+    // Static: 注入 system prompt（永不变）
     this.register("identity", buildIdentitySection);
     this.register("safety", buildSafetySection);
-
-    // High: 行为规则（很少变化）
     this.register("style", buildStyleSection);
     this.register("task-management", buildTaskManagementSection);
     this.register("tool-policy", buildToolPolicySection);
-
-    // Medium: 环境 + 技能（每 session 可能不同）
     this.register("environment", buildEnvironmentSection);
+
+    // Dynamic: 注入 message 流（可变）
     this.register("active-skill", buildActiveSkillSection);
     this.register("plan-mode", buildPlanModeSection);
-
-    // Dynamic: 防幻觉参考表（每轮可能变化）
     this.register("anti-hallucination", buildAntiHallucinationSection);
   }
 
@@ -127,16 +128,64 @@ export class PromptBuilder {
   }
 
   /**
-   * 构建最终的 system prompt
+   * 构建 system prompt（仅 layer: "system" 的静态 sections）
    *
-   * 流程：
-   * 1. 调用所有 factory 生成 sections
-   * 2. 应用 overrides
-   * 3. 过滤 disabled sections 和 null 结果
-   * 4. 按优先级 + 权重排序
-   * 5. 用 XML 标签包裹并拼接
+   * 输出在整个 session 内保持不变，确保 prompt cache 前缀命中。
+   * 不包含任何可能变化的内容。
    */
   build(): string {
+    return this.buildByLayer("system");
+  }
+
+  /**
+   * 构建 message-level 动态注入内容（仅 layer: "message" 的 sections）
+   *
+   * 输出通过 <system-reminder> 注入最后一条用户消息。
+   * 包含技能覆盖、模式切换、防幻觉参考表等动态内容。
+   *
+   * @returns 动态注入内容，如果没有动态 section 则返回空字符串
+   */
+  buildDynamicInjection(): string {
+    return this.buildByLayer("message");
+  }
+
+  /**
+   * 按 layer 过滤并构建 sections
+   */
+  private buildByLayer(layer: "system" | "message"): string {
+    const sections = this.collectSections(layer);
+
+    // 组装
+    const parts = sections.map(section => this.formatSection(section));
+    let result = parts.join("\n\n");
+
+    // 长度限制（仅对 system prompt 生效）
+    if (layer === "system" && this.config.maxLength > 0 && result.length > this.config.maxLength) {
+      log.warn("System prompt exceeds max length, truncating", {
+        length: result.length,
+        maxLength: this.config.maxLength,
+      });
+      while (result.length > this.config.maxLength && sections.length > 0) {
+        const removed = sections.pop()!;
+        log.debug(`Truncating section: ${removed.id}`);
+        const newParts = sections.map(s => this.formatSection(s));
+        result = newParts.join("\n\n");
+      }
+    }
+
+    log.debug(`Prompt ${layer} layer built`, {
+      sectionCount: sections.length,
+      sectionIds: sections.map(s => s.id),
+      totalLength: result.length,
+    });
+
+    return result;
+  }
+
+  /**
+   * 收集、过滤、排序指定 layer 的 sections
+   */
+  private collectSections(layer?: "system" | "message"): PromptSection[] {
     const sections: PromptSection[] = [];
 
     for (const [id, factory] of this.factories) {
@@ -150,8 +199,8 @@ export class PromptBuilder {
           Object.assign(section, override);
         }
 
-        // 过滤禁用的 sections
         if (!section.enabled) continue;
+        if (layer && section.layer !== layer) continue;
 
         sections.push(section);
       } catch (error: any) {
@@ -166,32 +215,7 @@ export class PromptBuilder {
       return b.weight - a.weight;
     });
 
-    // 组装
-    const parts = sections.map(section => this.formatSection(section));
-    let result = parts.join("\n\n");
-
-    // 长度限制
-    if (this.config.maxLength > 0 && result.length > this.config.maxLength) {
-      log.warn("System prompt exceeds max length, truncating dynamic sections", {
-        length: result.length,
-        maxLength: this.config.maxLength,
-      });
-      // 从后面（低优先级）开始截断
-      while (result.length > this.config.maxLength && sections.length > 0) {
-        const removed = sections.pop()!;
-        log.debug(`Truncating section: ${removed.id}`);
-        const newParts = sections.map(s => this.formatSection(s));
-        result = newParts.join("\n\n");
-      }
-    }
-
-    log.debug("System prompt built", {
-      sectionCount: sections.length,
-      sectionIds: sections.map(s => s.id),
-      totalLength: result.length,
-    });
-
-    return result;
+    return sections;
   }
 
   /**
@@ -214,25 +238,8 @@ export class PromptBuilder {
   /**
    * 获取 build 后的 section 列表（用于调试）
    */
-  buildSections(): PromptSection[] {
-    const sections: PromptSection[] = [];
-
-    for (const [id, factory] of this.factories) {
-      try {
-        const section = factory();
-        if (!section) continue;
-        const override = this.overrides.get(id);
-        if (override) Object.assign(section, override);
-        if (!section.enabled) continue;
-        sections.push(section);
-      } catch { /* skip */ }
-    }
-
-    return sections.sort((a, b) => {
-      const priorityDiff = PRIORITY_ORDER[b.priority] - PRIORITY_ORDER[a.priority];
-      if (priorityDiff !== 0) return priorityDiff;
-      return b.weight - a.weight;
-    });
+  buildSections(layer?: "system" | "message"): PromptSection[] {
+    return this.collectSections(layer);
   }
 }
 
@@ -251,12 +258,21 @@ export function getPromptBuilder(): PromptBuilder {
 }
 
 /**
- * 构建系统提示（便捷函数）
+ * 构建系统提示（便捷函数）— 仅静态内容
  *
  * 等价于 getPromptBuilder().build()
  */
 export function buildSystemPrompt(): string {
   return getPromptBuilder().build();
+}
+
+/**
+ * 构建动态注入内容（便捷函数）— 技能/模式/防幻觉
+ *
+ * 等价于 getPromptBuilder().buildDynamicInjection()
+ */
+export function buildDynamicInjection(): string {
+  return getPromptBuilder().buildDynamicInjection();
 }
 
 /**
