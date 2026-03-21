@@ -55,6 +55,9 @@ import {
   resetPipeline,
 } from "../middleware/index.js";
 import {
+  buildSystemPrompt,
+} from "../prompt/index.js";
+import {
   emitThinking,
   emitStreaming,
   emitToolUse,
@@ -129,134 +132,8 @@ function extractTextContent(content: any): string {
 // 当前模型
 let currentModel = getDefaultModel();
 
-// 获取 Git 状态
-function getGitStatus(): string {
-  try {
-    const { execSync } = require("child_process");
-    const branch = execSync("git branch --show-current", { encoding: "utf-8", cwd: process.cwd() }).trim();
-    const status = execSync("git status --short", { encoding: "utf-8", cwd: process.cwd() }).trim();
-    const recentCommits = execSync("git log --oneline -5", { encoding: "utf-8", cwd: process.cwd() }).trim();
-    return `Current branch: ${branch}\n\nStatus:\n${status || "(clean)"}\n\nRecent commits:\n${recentCommits}`;
-  } catch {
-    return "Git status unavailable";
-  }
-}
-
-// 构建系统提示
-function buildSystemPrompt(): string {
-  const isWindows = process.platform === "win32";
-  const isMac = process.platform === "darwin";
-  const osName = isWindows ? "Windows" : isMac ? "macOS" : "Linux";
-  const permissionMode = getPermissionMode();
-
-  const windowsNotes = `- This is a Windows system. Use Windows commands instead of Unix commands:
-  - Use \`cd\` instead of \`pwd\` to show current directory
-  - Use \`dir\` instead of \`ls\` to list files
-  - Use \`type\` instead of \`cat\` to display file contents
-  - Use \`copy\` instead of \`cp\`, \`move\` instead of \`mv\`, \`del\` instead of \`rm\`
-  - Use \`rmdir /s /q\` instead of \`rm -rf\`
-- Or use PowerShell commands (e.g., \`Get-Location\`, \`Get-ChildItem\`)
-- Path separator is backslash (\\\\) but forward slash (/) often works too`;
-
-  const unixNotes = `- This is a Unix-like system. Standard Unix commands are available.
-- Shell: ${process.env.SHELL || "/bin/bash"}`;
-
-  // Active skill instructions
-  const skillRuntime = getSkillRuntime();
-  const activeSkill = skillRuntime.getActiveSkill();
-  const skillInstructions = activeSkill ? `
-
-# ACTIVE SKILL: ${activeSkill.name.toUpperCase()}
-${activeSkill.description}
-
-${activeSkill.systemPrompt || ""}
-
-## Tool Access
-${activeSkill.tools === "*" ? "You have access to all available tools." : `Available tools: ${activeSkill.tools.join(", ")}`}
-${activeSkill.readOnly ? "\n**This is a read-only skill. You CANNOT modify any files.**" : ""}
-` : "";
-
-  // Plan mode specific instructions
-  const planModeInstructions = permissionMode === "plan" ? `
-
-# PLAN MODE ACTIVE
-You are currently in **PLAN MODE** - a research and planning mode for exploring and designing before implementation.
-
-## Available Tools in Plan Mode
-
-**Exploration (read-only):**
-- Read, Glob, Grep, LS - explore the codebase
-- WebSearch, WebFetch - research solutions online
-
-**Planning (can write):**
-- SavePlan - save your plan to a markdown file (.yterm/plan.md)
-- ReadPlan - read a previously saved plan
-- TodoWrite - manage task lists and track progress
-
-**Control:**
-- ExitPlanMode - exit plan mode when ready to implement
-
-## You CANNOT:
-- Edit or create source code files (use Write/Edit tools)
-- Execute bash commands
-- Modify the codebase directly
-
-## Your Role in Plan Mode
-1. Research the codebase to understand existing patterns
-2. Analyze requirements and identify potential issues
-3. Use TodoWrite to break down the task into steps
-4. Use SavePlan to document your implementation plan
-5. Use ExitPlanMode when ready to implement
-
-When you have a complete plan, use the ExitPlanMode tool to return to normal mode with full tool access.
-` : "";
-
-  return `You are Claude Code, Anthropic's official CLI for Claude.
-You are an interactive CLI tool that helps users with software engineering tasks. Use the instructions below and the tools available to you to assist the user.
-
-IMPORTANT: You must NEVER generate or guess URLs for the user unless you are confident that the URLs are for helping the user with programming. You may use URLs provided by the user in their messages or local files.
-
-# Tone and style
-- Only use emojis if the user explicitly requests it. Avoid using emojis in all communication unless asked.
-- Your output will be displayed on a command line interface. Your responses should be short and concise. You can use Github-flavored markdown for formatting.
-- Output text to communicate with the user; all text you output outside of tool use is displayed to the user. Only use tools to complete tasks. Never use tools like Bash or code comments as means to communicate with the user during the session.
-- NEVER create files unless they're absolutely necessary for achieving your goal. ALWAYS prefer editing an existing file to creating a new one. This includes markdown files.
-
-# Professional objectivity
-Prioritize technical accuracy and truthfulness over validating the user's beliefs. Focus on facts and problem-solving, providing direct, objective technical info without any unnecessary superlatives, praise, or emotional validation. It is best for the user if Claude honestly applies the same rigorous standards to all ideas and disagrees when necessary, even if it may not be what the user wants to hear.
-
-# Task Management
-You have access to the TodoWrite tool to help you manage and plan tasks. Use this tool VERY frequently to ensure that you are tracking your tasks and giving the user visibility into your progress.
-These tools are also EXTREMELY helpful for planning tasks, and for breaking down larger complex tasks into smaller steps. If you do not use this tool when planning, you may forget to do important tasks - and that is unacceptable.
-
-It is critical that you mark todos as completed as soon as you are done with a task. Do not batch up multiple tasks before marking them as completed.
-
-# Doing tasks
-The user will primarily request you perform software engineering tasks. This includes solving bugs, adding new functionality, refactoring code, explaining code, and more. For these tasks the following steps are recommended:
-- Use the TodoWrite tool to plan the task if required
-- NEVER propose changes to code you haven't read. If a user asks about or wants you to modify a file, read it first. Understand existing code before suggesting modifications.
-- Be careful not to introduce security vulnerabilities such as command injection, XSS, SQL injection, and other OWASP top 10 vulnerabilities. If you notice that you wrote insecure code, immediately fix it.
-- Avoid over-engineering. Only make changes that are directly requested or clearly necessary. Keep solutions simple and focused.
-
-# Tool usage policy
-- You can call multiple tools in a single response. If you intend to call multiple tools and there are no dependencies between them, make all independent tool calls in parallel. Maximize use of parallel tool calls where possible to increase efficiency.
-- Use specialized tools instead of bash commands when possible. For file operations, use dedicated tools: Read for reading files instead of cat/head/tail, Edit for editing instead of sed/awk, and Write for creating files instead of cat with heredoc or echo redirection. Reserve bash tools exclusively for actual system commands and terminal operations that require shell execution.
-- NEVER use bash echo or other command-line tools to communicate thoughts, explanations, or instructions to the user. Output all communication directly in your response text instead.
-
-# Environment Information
-<env>
-Working directory: ${process.cwd()}
-Is directory a git repo: Yes
-Platform: ${process.platform}
-Today's date: ${new Date().toISOString().split("T")[0]}
-</env>
-
-# Important Notes for ${osName}
-${isWindows ? windowsNotes : unixNotes}
-${skillInstructions}${planModeInstructions}
-gitStatus: This is the git status at the start of the conversation. Note that this status is a snapshot in time, and will not update during the conversation.
-${getGitStatus()}`;
-}
+// System prompt 现在由 src/core/prompt/ 模块分层构建
+// buildSystemPrompt() 从 ../prompt/index.js 导入
 
 
 // 敏感工具列表从 tools/types.ts 导入
@@ -363,20 +240,15 @@ const agentNode = async (
   }
 
   // 注入上下文到最后一条用户消息（CLAUDE.md、todo 列表等）
+  // 注：防幻觉参考表现在由 prompt/sections.ts 的 buildAntiHallucinationSection 在系统提示中注入
   const contextInjection = generateContextInjection();
-  // 注入防幻觉参考表（如果有活跃映射）
-  const pipeline = getAntiHallucinationPipeline();
-  const referenceTable = pipeline.getReferenceTable();
-  const fullInjection = [contextInjection, referenceTable].filter(Boolean).join("\n");
-
-  if (fullInjection) {
-    // 找到最后一条用户消息并注入上下文
+  if (contextInjection) {
     for (let i = messagesWithSystem.length - 1; i >= 0; i--) {
       const msg = messagesWithSystem[i];
       if (msg instanceof HumanMessage) {
         const originalContent = typeof msg.content === "string" ? msg.content : String(msg.content);
-        messagesWithSystem[i] = new HumanMessage(originalContent + "\n" + fullInjection);
-        log.debug("Context injected into user message", { contextLength: fullInjection.length, hasReferenceTable: !!referenceTable });
+        messagesWithSystem[i] = new HumanMessage(originalContent + "\n" + contextInjection);
+        log.debug("Context injected into user message", { contextLength: contextInjection.length });
         break;
       }
     }
