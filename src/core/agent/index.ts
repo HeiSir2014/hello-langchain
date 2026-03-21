@@ -51,6 +51,10 @@ import {
   appendDailyLog,
 } from "../services/memory.js";
 import {
+  getAntiHallucinationPipeline,
+  resetPipeline,
+} from "../middleware/index.js";
+import {
   emitThinking,
   emitStreaming,
   emitToolUse,
@@ -324,6 +328,9 @@ const agentNode = async (
   // Emit thinking event
   emitThinking(modelName);
 
+  // 重置防幻觉管道（新一轮 agent 思考）
+  resetPipeline();
+
   // 根据当前权限模式和活动技能获取可用工具
   // Priority: permission mode > active skill > all tools
   const modeTools = getToolsForCurrentMode();
@@ -357,14 +364,19 @@ const agentNode = async (
 
   // 注入上下文到最后一条用户消息（CLAUDE.md、todo 列表等）
   const contextInjection = generateContextInjection();
-  if (contextInjection) {
+  // 注入防幻觉参考表（如果有活跃映射）
+  const pipeline = getAntiHallucinationPipeline();
+  const referenceTable = pipeline.getReferenceTable();
+  const fullInjection = [contextInjection, referenceTable].filter(Boolean).join("\n");
+
+  if (fullInjection) {
     // 找到最后一条用户消息并注入上下文
     for (let i = messagesWithSystem.length - 1; i >= 0; i--) {
       const msg = messagesWithSystem[i];
       if (msg instanceof HumanMessage) {
         const originalContent = typeof msg.content === "string" ? msg.content : String(msg.content);
-        messagesWithSystem[i] = new HumanMessage(originalContent + "\n" + contextInjection);
-        log.debug("Context injected into user message", { contextLength: contextInjection.length });
+        messagesWithSystem[i] = new HumanMessage(originalContent + "\n" + fullInjection);
+        log.debug("Context injected into user message", { contextLength: fullInjection.length, hasReferenceTable: !!referenceTable });
         break;
       }
     }
@@ -961,8 +973,22 @@ function handleStreamUpdate(nodeName: string, update: any): void {
     // First, emit any text content from the AI message
     // This handles cases where AI sends text before/after tool calls
     if (AIMessage.isInstance(lastMsg)) {
-      const content = typeof lastMsg.content === "string" ? lastMsg.content : extractTextContent(lastMsg.content);
+      let content = typeof lastMsg.content === "string" ? lastMsg.content : extractTextContent(lastMsg.content);
       if (content && content.trim()) {
+        // Post-processing: 还原占位符为真实值
+        const ahPipeline = getAntiHallucinationPipeline();
+        if (ahPipeline.hasActiveMappings()) {
+          const ppResult = ahPipeline.processModelOutput(content);
+          content = ppResult.content;
+          if (ppResult.restore.restoredCount > 0) {
+            log.info("Anti-hallucination post-processing applied", {
+              restored: ppResult.restore.restoredCount,
+              corrections: ppResult.restore.corrections.length,
+              warnings: ppResult.validation.warnings.length,
+            });
+          }
+        }
+
         log.debug("Agent response content", {
           contentLength: content.length,
           hasToolCalls: !!(msgToolCalls && msgToolCalls.length > 0),
@@ -996,17 +1022,34 @@ function handleStreamUpdate(nodeName: string, update: any): void {
     clearToolAbortController();
     clearToolCallIds();
 
+    // 获取防幻觉管道
+    const ahPipeline = getAntiHallucinationPipeline();
+
     for (const msg of update.messages) {
       if (msg instanceof ToolMessage) {
         const content = typeof msg.content === "string" ? msg.content : JSON.stringify(msg.content);
-        const preview = content.length > 200 ? content.slice(0, 200) + "..." : content;
+
+        // Pre-processing: 将 tool_result 中的高熵 ID 替换为占位符
+        const processedContent = ahPipeline.processToolResult(content, msg.name || "unknown");
+
+        // 如果内容被重映射，更新 ToolMessage 的 content
+        if (processedContent !== content) {
+          (msg as any).content = processedContent;
+          log.debug("Tool result remapped by anti-hallucination pipeline", {
+            tool: msg.name,
+            originalLength: content.length,
+            processedLength: processedContent.length,
+          });
+        }
+
+        const preview = processedContent.length > 200 ? processedContent.slice(0, 200) + "..." : processedContent;
         log.info("Tool execution result", {
           tool: msg.name || "unknown",
-          resultLength: content.length,
+          resultLength: processedContent.length,
           preview: preview.slice(0, 100),
         });
         log.debug("Tool result", { tool: msg.name, preview });
-        // Emit tool result event
+        // Emit tool result event (原始内容用于 UI 展示)
         emitToolResult(msg.name || "tool", content, msg.tool_call_id || `result_${Date.now()}`);
       }
     }
