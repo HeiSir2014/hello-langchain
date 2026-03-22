@@ -16,6 +16,7 @@
 
 import { loadCommandFiles } from "../../core/projectDirs.js";
 import { log } from "../../logger.js";
+import { parseFrontmatter } from "../../core/utils/frontmatter.js";
 import type { Command, PromptCommand, CommandContext } from "./index.js";
 
 // ============ Types ============
@@ -29,46 +30,6 @@ interface CustomCommandConfig {
 interface ParsedCommand {
   config: CustomCommandConfig;
   promptTemplate: string;
-}
-
-// ============ Parsing ============
-
-/**
- * Parse YAML frontmatter from markdown content
- */
-function parseFrontmatter(content: string): { frontmatter: Record<string, any>; body: string } {
-  const frontmatterRegex = /^---\n([\s\S]*?)\n---\n([\s\S]*)$/;
-  const match = content.match(frontmatterRegex);
-
-  if (!match) {
-    return { frontmatter: {}, body: content };
-  }
-
-  const [, yaml, body] = match;
-  const frontmatter: Record<string, any> = {};
-
-  // Simple YAML parsing (key: value)
-  for (const line of yaml.split("\n")) {
-    const colonIndex = line.indexOf(":");
-    if (colonIndex === -1) continue;
-
-    const key = line.slice(0, colonIndex).trim();
-    let value = line.slice(colonIndex + 1).trim();
-
-    // Handle arrays (simple format: [a, b, c])
-    if (value.startsWith("[") && value.endsWith("]")) {
-      value = value.slice(1, -1);
-      frontmatter[key] = value.split(",").map((v) => v.trim().replace(/['"]/g, ""));
-    } else if (value === "true") {
-      frontmatter[key] = true;
-    } else if (value === "false") {
-      frontmatter[key] = false;
-    } else {
-      frontmatter[key] = value.replace(/['"]/g, "");
-    }
-  }
-
-  return { frontmatter, body: body.trim() };
 }
 
 /**

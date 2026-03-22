@@ -21,6 +21,7 @@ import { homedir } from "os";
 import { log } from "../../logger.js";
 import type { SkillConfig, SkillDirectory, SkillLocation } from "./types.js";
 import { getSkillsDirPaths } from "../projectDirs.js";
+import { parseFrontmatter } from "../utils/frontmatter.js";
 
 // ============ Skill Directories ============
 
@@ -172,49 +173,7 @@ NEVER change functionality unless explicitly asked.`,
   },
 ];
 
-// ============ Markdown Parsing ============
-
-/**
- * Parse YAML frontmatter from markdown content
- */
-function parseFrontmatter(content: string): { frontmatter: Record<string, any>; body: string } {
-  const frontmatterRegex = /^---\n([\s\S]*?)\n---\n([\s\S]*)$/;
-  const match = content.match(frontmatterRegex);
-
-  if (!match) {
-    return { frontmatter: {}, body: content };
-  }
-
-  const [, yaml, body] = match;
-  const frontmatter: Record<string, any> = {};
-
-  // Simple YAML parsing (key: value)
-  for (const line of yaml.split("\n")) {
-    const colonIndex = line.indexOf(":");
-    if (colonIndex === -1) continue;
-
-    const key = line.slice(0, colonIndex).trim();
-    let value = line.slice(colonIndex + 1).trim();
-
-    // Handle arrays (simple format: [a, b, c] or - a)
-    if (value.startsWith("[") && value.endsWith("]")) {
-      value = value.slice(1, -1);
-      frontmatter[key] = value.split(",").map((v) => v.trim().replace(/['"]/g, ""));
-    } else if (value === "*") {
-      frontmatter[key] = "*";
-    } else if (value === "true") {
-      frontmatter[key] = true;
-    } else if (value === "false") {
-      frontmatter[key] = false;
-    } else if (!isNaN(Number(value))) {
-      frontmatter[key] = Number(value);
-    } else {
-      frontmatter[key] = value.replace(/['"]/g, "");
-    }
-  }
-
-  return { frontmatter, body: body.trim() };
-}
+// ============ Skill File Loading ============
 
 /**
  * Load a skill from a markdown file

@@ -1,10 +1,10 @@
 /**
- * Init Agent - LangChain 1.0 createAgent for CLAUDE.md Generation
+ * Init Agent - LangChain 1.0 createAgent for Project Instructions Generation
  *
  * Migrated from custom StateGraph to LangChain 1.0's createAgent with middleware.
  * Uses createMiddleware to inject codebase context before the model call.
  *
- * The init agent analyzes the codebase and generates/improves CLAUDE.md
+ * The init agent analyzes the codebase and generates/improves AGENT.md or CLAUDE.md
  */
 import { createAgent, createMiddleware, tool } from "langchain";
 import { z } from "zod";
@@ -32,52 +32,53 @@ import {
 // ============ Tools ============
 
 /**
- * Tool for writing CLAUDE.md file
+ * Tool for writing project instructions file (AGENT.md or CLAUDE.md)
  */
 const writeClaudeMdTool = tool(
   async ({ content }: { content: string }) => {
     const filePath = getProductFilePath();
+    const fileName = filePath.split("/").pop() || "CLAUDE.md";
     try {
       writeFileSync(filePath, content, "utf-8");
-      log.info("CLAUDE.md written successfully", { path: filePath });
+      log.info("Instructions file written successfully", { path: filePath });
 
       // Mark onboarding complete when file is written
       markOnboardingComplete();
 
-      return `Successfully wrote CLAUDE.md to ${filePath}`;
+      return `Successfully wrote ${fileName} to ${filePath}`;
     } catch (error: any) {
-      log.error("Failed to write CLAUDE.md", { error: error.message });
-      return `Error writing CLAUDE.md: ${error.message}`;
+      log.error("Failed to write instructions file", { error: error.message });
+      return `Error writing ${fileName}: ${error.message}`;
     }
   },
   {
     name: "WriteClaudeMd",
-    description: "Write the generated content to CLAUDE.md file in the project root",
+    description: "Write the generated content to the project instructions file (AGENT.md or CLAUDE.md) in the project root",
     schema: z.object({
-      content: z.string().describe("The markdown content to write to CLAUDE.md"),
+      content: z.string().describe("The markdown content to write to the instructions file"),
     }),
   }
 );
 
 /**
- * Tool for reading existing CLAUDE.md
+ * Tool for reading existing instructions file (AGENT.md or CLAUDE.md)
  */
 const readClaudeMdTool = tool(
   async () => {
     const filePath = getProductFilePath();
     if (!existsSync(filePath)) {
-      return "CLAUDE.md does not exist yet.";
+      return "No instructions file (AGENT.md or CLAUDE.md) exists yet.";
     }
     try {
       const content = readFileSync(filePath, "utf-8");
       return content;
     } catch (error: any) {
-      return `Error reading CLAUDE.md: ${error.message}`;
+      return `Error reading instructions file: ${error.message}`;
     }
   },
   {
     name: "ReadClaudeMd",
-    description: "Read the existing CLAUDE.md file if it exists",
+    description: "Read the existing project instructions file (AGENT.md or CLAUDE.md) if it exists",
     schema: z.object({}),
   }
 );
@@ -86,11 +87,11 @@ const initTools = [writeClaudeMdTool, readClaudeMdTool];
 
 // ============ System Prompt ============
 
-const INIT_SYSTEM_PROMPT = `You are a specialized agent for analyzing codebases and generating CLAUDE.md documentation files.
+const INIT_SYSTEM_PROMPT = `You are a specialized agent for analyzing codebases and generating project instructions files (AGENT.md or CLAUDE.md).
 
-Your task is to analyze the provided codebase context and create a comprehensive but concise CLAUDE.md file that will help AI coding agents (like yourself) work effectively in this repository.
+Your task is to analyze the provided codebase context and create a comprehensive but concise instructions file that will help AI coding agents (like yourself) work effectively in this repository.
 
-## Guidelines for CLAUDE.md
+## Guidelines for Instructions File (AGENT.md / CLAUDE.md)
 
 The file should be approximately 50-100 lines and include:
 
@@ -123,7 +124,7 @@ The file should be approximately 50-100 lines and include:
 
 ## Important Rules
 
-- If a CLAUDE.md already exists, IMPROVE it rather than replace it entirely
+- If an AGENT.md or CLAUDE.md already exists, IMPROVE it rather than replace it entirely
 - Preserve any custom sections the user may have added
 - Include any Cursor rules (.cursor/rules/) or Copilot instructions (.github/copilot-instructions.md) you find
 - Be specific to THIS project - don't give generic advice
@@ -150,7 +151,7 @@ const codebaseContextMiddleware = createMiddleware({
       const contextPrompt = formatCodebaseContextForPrompt(context);
 
       const userPrompt = isUpdate
-        ? `Please analyze this codebase and IMPROVE the existing CLAUDE.md file.
+        ? `Please analyze this codebase and IMPROVE the existing instructions file.
 
 ${contextPrompt}
 
@@ -161,7 +162,7 @@ Focus on:
 4. Making it more specific and actionable
 
 Use the WriteClaudeMd tool to write the improved file.`
-        : `Please analyze this codebase and CREATE a new CLAUDE.md file.
+        : `Please analyze this codebase and CREATE a new CLAUDE.md instructions file.
 
 ${contextPrompt}
 
@@ -236,7 +237,7 @@ export async function runInitAgent(userRequest?: string): Promise<InitAgentResul
       messages: [
         {
           role: "user",
-          content: userRequest || "Initialize CLAUDE.md for this project",
+          content: userRequest || "Initialize project instructions file for this project",
         },
       ],
     });
@@ -248,7 +249,9 @@ export async function runInitAgent(userRequest?: string): Promise<InitAgentResul
       ? (typeof lastMsg.content === "string" ? lastMsg.content : String(lastMsg.content))
       : "";
 
-    const successMessage = `Successfully ${isUpdate ? "updated" : "created"} CLAUDE.md with project documentation.`;
+    const filePath = getProductFilePath();
+    const fileName = filePath.split("/").pop() || "CLAUDE.md";
+    const successMessage = `Successfully ${isUpdate ? "updated" : "created"} ${fileName} with project documentation.`;
 
     emitResponse(successMessage);
     emitDone();

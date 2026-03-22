@@ -268,30 +268,79 @@ export function getAllConfigFiles(
   return files;
 }
 
-// ============ CLAUDE.md / Instructions ============
+// ============ CLAUDE.md / AGENT.md / Instructions ============
+
+/** Supported instruction file names in priority order */
+export const INSTRUCTION_FILE_NAMES = ["AGENT.md", "CLAUDE.md"] as const;
 
 /**
- * Find project instructions file (CLAUDE.md)
- * Checks both root and config directories
+ * Find project instructions file (AGENT.md or CLAUDE.md)
+ * Checks both root and config directories, AGENT.md takes priority
  */
 export function findProjectInstructions(projectPath?: string): string | null {
   const cwd = projectPath || process.cwd();
 
-  // Check root CLAUDE.md first
-  const rootClaudeMd = join(cwd, "CLAUDE.md");
-  if (existsSync(rootClaudeMd)) {
-    return rootClaudeMd;
+  // Check root files first (AGENT.md > CLAUDE.md)
+  for (const fileName of INSTRUCTION_FILE_NAMES) {
+    const rootFile = join(cwd, fileName);
+    if (existsSync(rootFile)) {
+      return rootFile;
+    }
   }
 
   // Check config directories
   for (const dirName of PROJECT_DIR_NAMES) {
-    const configClaudeMd = join(cwd, dirName, "CLAUDE.md");
-    if (existsSync(configClaudeMd)) {
-      return configClaudeMd;
+    for (const fileName of INSTRUCTION_FILE_NAMES) {
+      const configFile = join(cwd, dirName, fileName);
+      if (existsSync(configFile)) {
+        return configFile;
+      }
     }
   }
 
   return null;
+}
+
+/**
+ * Find all project instruction files (for merging multiple sources)
+ * Returns in priority order (lowest to highest)
+ */
+export function findAllProjectInstructions(projectPath?: string): Array<{ path: string; content: string }> {
+  const cwd = projectPath || process.cwd();
+  const home = homedir();
+  const files: Array<{ path: string; content: string }> = [];
+
+  const tryAdd = (filePath: string) => {
+    if (existsSync(filePath)) {
+      try {
+        const content = readFileSync(filePath, "utf-8");
+        files.push({ path: filePath, content });
+      } catch (error) {
+        log.debug("Failed to read instruction file", { filePath, error });
+      }
+    }
+  };
+
+  // User global (lowest priority)
+  for (const dirName of [...USER_DIR_NAMES].reverse()) {
+    for (const fileName of [...INSTRUCTION_FILE_NAMES].reverse()) {
+      tryAdd(join(home, dirName, fileName));
+    }
+  }
+
+  // Project config directories
+  for (const dirName of [...PROJECT_DIR_NAMES].reverse()) {
+    for (const fileName of [...INSTRUCTION_FILE_NAMES].reverse()) {
+      tryAdd(join(cwd, dirName, fileName));
+    }
+  }
+
+  // Project root (highest priority)
+  for (const fileName of [...INSTRUCTION_FILE_NAMES].reverse()) {
+    tryAdd(join(cwd, fileName));
+  }
+
+  return files;
 }
 
 /**

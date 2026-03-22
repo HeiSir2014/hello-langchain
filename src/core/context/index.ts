@@ -6,6 +6,7 @@ import { log } from "../../logger.js";
 import {
   PROJECT_DIR_NAMES,
   USER_DIR_NAMES,
+  INSTRUCTION_FILE_NAMES,
 } from "../projectDirs.js";
 import { loadBootstrapMemory } from "../services/memory.js";
 
@@ -16,52 +17,69 @@ export interface ContextItem {
   priority: number; // 越高越靠前
 }
 
-// 读取 CLAUDE.md 文件内容
+// 读取项目指令文件（AGENT.md 或 CLAUDE.md）
 // Supports multiple locations with priority:
-// 1. Project root CLAUDE.md
-// 2. .claude/CLAUDE.md (Claude Code compatible)
-// 3. .yterm/CLAUDE.md
-// 4. ~/.claude/CLAUDE.md (user global)
-// 5. ~/.yterm/CLAUDE.md (user global)
+// 1. Project root AGENT.md (highest)
+// 2. Project root CLAUDE.md
+// 3. .claude/AGENT.md or .claude/CLAUDE.md
+// 4. .yterm/AGENT.md or .yterm/CLAUDE.md
+// 5. ~/.claude/AGENT.md or ~/.claude/CLAUDE.md (user global)
+// 6. ~/.yterm/AGENT.md or ~/.yterm/CLAUDE.md (user global, lowest)
 export function readClaudeMd(): { content: string; source: string } | null {
   const cwd = process.cwd();
   const home = homedir();
 
   // Check locations in priority order
-  const locations = [
-    // Project root (highest priority)
-    join(cwd, "CLAUDE.md"),
-    // Project config directories
-    ...PROJECT_DIR_NAMES.map((dir) => join(cwd, dir, "CLAUDE.md")),
-    // User config directories (lowest priority)
-    ...USER_DIR_NAMES.map((dir) => join(home, dir, "CLAUDE.md")),
-  ];
+  const locations: string[] = [];
+
+  // Project root (highest priority) - AGENT.md > CLAUDE.md
+  for (const fileName of INSTRUCTION_FILE_NAMES) {
+    locations.push(join(cwd, fileName));
+  }
+
+  // Project config directories
+  for (const dir of PROJECT_DIR_NAMES) {
+    for (const fileName of INSTRUCTION_FILE_NAMES) {
+      locations.push(join(cwd, dir, fileName));
+    }
+  }
+
+  // User config directories (lowest priority)
+  for (const dir of USER_DIR_NAMES) {
+    for (const fileName of INSTRUCTION_FILE_NAMES) {
+      locations.push(join(home, dir, fileName));
+    }
+  }
 
   for (const filePath of locations) {
     if (existsSync(filePath)) {
       try {
         const content = readFileSync(filePath, "utf-8");
-        log.info(`Loaded CLAUDE.md from ${filePath}`);
+        const fileName = filePath.split("/").pop() || "CLAUDE.md";
+        log.info(`Loaded instructions from ${filePath}`);
         return { content, source: filePath };
       } catch (error: any) {
-        log.warn(`Failed to read CLAUDE.md from ${filePath}: ${error.message}`);
+        log.warn(`Failed to read instructions from ${filePath}: ${error.message}`);
       }
     }
   }
   return null;
 }
 
-// 生成 CLAUDE.md 上下文提示
+// 生成 CLAUDE.md / AGENT.md 上下文提示
 export function generateClaudeMdContext(): string | null {
-  const claudeMd = readClaudeMd();
-  if (!claudeMd) return null;
+  const instructions = readClaudeMd();
+  if (!instructions) return null;
+
+  const isUserGlobal = instructions.source.includes(homedir());
+  const sourceType = isUserGlobal ? "user's private global instructions for all projects" : "project instructions, checked into the codebase";
 
   return `# claudeMd
 Codebase and user instructions are shown below. Be sure to adhere to these instructions. IMPORTANT: These instructions OVERRIDE any default behavior and you MUST follow them exactly as written.
 
-Contents of ${claudeMd.source} (${claudeMd.source.includes(homedir()) ? "user's private global instructions for all projects" : "project-specific instructions"}):
+Contents of ${instructions.source} (${sourceType}):
 
-${claudeMd.content}
+${instructions.content}
 
       IMPORTANT: this context may or may not be relevant to your tasks. You should not respond to this context unless it is highly relevant to your task.`;
 }

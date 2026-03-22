@@ -32,7 +32,8 @@ export interface ProjectConfig {
 
 const CONFIG_DIR = ".yterm";
 const CONFIG_FILE = "project.json";
-const PRODUCT_FILE = "CLAUDE.md"; // The file we generate
+/** Supported instruction file names in priority order */
+const PRODUCT_FILES = ["AGENT.md", "CLAUDE.md"] as const;
 
 // ============ Config Operations ============
 
@@ -51,17 +52,27 @@ export function getProjectConfigPath(): string {
 }
 
 /**
- * Get the CLAUDE.md file path
+ * Get the instruction file path (AGENT.md or CLAUDE.md)
+ * Returns existing file path (AGENT.md preferred), or default CLAUDE.md path
  */
 export function getProductFilePath(): string {
-  return join(process.cwd(), PRODUCT_FILE);
+  const cwd = process.cwd();
+  for (const fileName of PRODUCT_FILES) {
+    const filePath = join(cwd, fileName);
+    if (existsSync(filePath)) {
+      return filePath;
+    }
+  }
+  // Default to CLAUDE.md for new projects
+  return join(cwd, PRODUCT_FILES[PRODUCT_FILES.length - 1]);
 }
 
 /**
- * Check if CLAUDE.md exists
+ * Check if any instruction file (AGENT.md or CLAUDE.md) exists
  */
 export function hasProductFile(): boolean {
-  return existsSync(getProductFilePath());
+  const cwd = process.cwd();
+  return PRODUCT_FILES.some(f => existsSync(join(cwd, f)));
 }
 
 /**
