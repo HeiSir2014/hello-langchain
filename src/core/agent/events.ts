@@ -1,6 +1,7 @@
 import { EventEmitter } from 'events';
 
-// Tool confirmation type
+// ============ Event Data Types ============
+
 export interface ToolConfirmation {
   name: string;
   args: Record<string, unknown>;
@@ -9,7 +10,6 @@ export interface ToolConfirmation {
   commandPrefix?: string | null;
 }
 
-// Tool progress type - for real-time updates during tool execution
 export interface ToolProgress {
   name: string;
   id: string;
@@ -18,21 +18,41 @@ export interface ToolProgress {
   siblingIds?: string[];
 }
 
-// Agent event types
-export type AgentEventType =
-  | { type: 'thinking'; model: string }
-  | { type: 'streaming'; content: string; delta: string }
-  | { type: 'tool_use'; name: string; args: Record<string, unknown>; id: string }
-  | { type: 'tool_progress'; name: string; id: string; message: string; percentage?: number; siblingIds?: string[] }
-  | { type: 'tool_result'; name: string; result: string; id: string; isError?: boolean }
-  | { type: 'response'; content: string }
-  | { type: 'error'; message: string }
-  | { type: 'confirm_required'; tools: ToolConfirmation[] }
-  | { type: 'compacting'; tokenCount?: number }
-  | { type: 'auto_compact'; messagesBefore: number; messagesAfter: number; summary?: string }
-  | { type: 'token_usage'; tokenCount: number; contextLimit: number; percentUsed: number }
-  | { type: 'background_task'; taskId: string; taskName: string; status: 'started' | 'completed' | 'failed'; result?: string }
-  | { type: 'done'; interrupted?: boolean };
+// ============ Typed Event Map ============
+
+/**
+ * Strongly-typed event map for agent events.
+ * Each key is an event type, value is the payload shape.
+ */
+export interface AgentEventMap {
+  thinking: { model: string };
+  streaming: { content: string; delta: string };
+  tool_use: { name: string; args: Record<string, unknown>; id: string };
+  tool_progress: { name: string; id: string; message: string; percentage?: number; siblingIds?: string[] };
+  tool_result: { name: string; result: string; id: string; isError?: boolean };
+  response: { content: string };
+  error: { message: string };
+  confirm_required: { tools: ToolConfirmation[] };
+  compacting: { tokenCount?: number };
+  auto_compact: { messagesBefore: number; messagesAfter: number; summary?: string };
+  token_usage: { tokenCount: number; contextLimit: number; percentUsed: number };
+  background_task: { taskId: string; taskName: string; status: 'started' | 'completed' | 'failed'; result?: string };
+  done: { interrupted?: boolean };
+}
+
+/**
+ * Union type of all agent events (discriminated by `type` field).
+ */
+export type AgentEventType = {
+  [K in keyof AgentEventMap]: { type: K } & AgentEventMap[K];
+}[keyof AgentEventMap];
+
+/**
+ * Extract event data for a specific event type.
+ */
+export type AgentEventData<T extends keyof AgentEventMap> = AgentEventMap[T];
+
+// ============ Typed Event Emitter ============
 
 class AgentEventEmitter extends EventEmitter {
   emit(event: 'agent', data: AgentEventType): boolean {

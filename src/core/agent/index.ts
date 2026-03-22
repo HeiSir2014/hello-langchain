@@ -42,7 +42,9 @@ import {
   buildComprehensiveSummaryPrompt,
   countMessageTokens,
   getContextUsage,
+  COMPRESSION_PROMPT,
 } from "./memory.js";
+import { extractTextContent, getMessageText } from "../utils/messages.js";
 import {
   generateContextInjection,
   wrapToolResult,
@@ -113,25 +115,6 @@ const AgentState = Annotation.Root({
     default: () => null,
   }),
 });
-
-// ============ 辅助函数 ============
-
-// 从 Anthropic 的 content 数组中提取文本内容
-function extractTextContent(content: any): string {
-  if (typeof content === "string") {
-    return content;
-  }
-  if (Array.isArray(content)) {
-    return content
-      .map((part) => {
-        if (typeof part === "string") return part;
-        if (part && typeof part === "object" && "text" in part) return part.text;
-        return "";
-      })
-      .join("");
-  }
-  return String(content);
-}
 
 // ============ 配置 ============
 
@@ -1442,39 +1425,11 @@ export async function compactHistory(): Promise<{ before: number; after: number 
   };
 }
 
-// ============ Compact 相关 ============
-
-const COMPRESSION_PROMPT = `Please provide a comprehensive summary of our conversation structured as follows:
-
-## Technical Context
-Development environment, tools, frameworks, and configurations in use. Programming languages, libraries, and technical constraints. File structure, directory organization, and project architecture.
-
-## Project Overview
-Main project goals, features, and scope. Key components, modules, and their relationships. Data models, APIs, and integration patterns.
-
-## Code Changes
-Files created, modified, or analyzed during our conversation. Specific code implementations, functions, and algorithms added. Configuration changes and structural modifications.
-
-## Debugging & Issues
-Problems encountered and their root causes. Solutions implemented and their effectiveness. Error messages, logs, and diagnostic information.
-
-## Current Status
-What we just completed successfully. Current state of the codebase and any ongoing work. Test results, validation steps, and verification performed.
-
-## Pending Tasks
-Immediate next steps and priorities. Planned features, improvements, and refactoring. Known issues, technical debt, and areas needing attention.
-
-## User Preferences
-Coding style, formatting, and organizational preferences. Communication patterns and feedback style. Tool choices and workflow preferences.
-
-## Key Decisions
-Important technical decisions made and their rationale. Alternative approaches considered and why they were rejected. Trade-offs accepted and their implications.
-
-Focus on information essential for continuing the conversation effectively, including specific details about code, files, errors, and plans.`;
+// ============ Compact ============
 
 /**
- * 生成对话摘要
- * 用于 /compact 命令，使用 LLM 将当前对话压缩为结构化摘要
+ * Generate a structured summary of the current conversation.
+ * Uses the shared COMPRESSION_PROMPT from memory.ts (single source of truth).
  */
 export async function generateSummary(): Promise<string> {
   const state = await getState();
@@ -1490,25 +1445,15 @@ export async function generateSummary(): Promise<string> {
   });
 
   try {
-    // 使用 simpleChatWithModel 生成摘要（无工具调用）
-    const summaryPrompt = `${COMPRESSION_PROMPT}\n\nPlease analyze the following conversation and provide the summary:\n\n${messages
-      .filter(m => !(m instanceof SystemMessage))
-      .map(m => {
-        const role = m instanceof HumanMessage ? "User" : "Assistant";
-        const content = typeof m.content === "string" ? m.content : extractTextContent(m.content);
-        return `${role}: ${content}`;
-      })
-      .join("\n\n")}`;
+    const nonSystemMessages = messages.filter(m => !(m instanceof SystemMessage));
+    const summaryPrompt = buildComprehensiveSummaryPrompt(nonSystemMessages);
 
     const summary = await simpleChatWithModel(
       [new HumanMessage(summaryPrompt)],
       currentModel
     );
 
-    log.info("Summary generated", {
-      summaryLength: summary.length,
-    });
-
+    log.info("Summary generated", { summaryLength: summary.length });
     return summary;
   } catch (error: any) {
     log.error("Failed to generate summary", { error: error.message });

@@ -1,120 +1,73 @@
 /**
- * 消息内存管理模块
+ * Memory Management Module
  *
- * 实现消息裁剪和总结功能，替代硬性递归限制
- * 当上下文接近 token 限制时，自动总结早期消息
- * 
+ * Token counting, context compression, and conversation summarization.
+ * Uses shared utilities from core/utils/messages.ts.
  */
 
-import { BaseMessage, HumanMessage, AIMessage, ToolMessage } from "@langchain/core/messages";
+import { BaseMessage, AIMessage } from "@langchain/core/messages";
 import { getModelContextWindow } from "../config.js";
+import { messagesToText } from "../utils/messages.js";
 
-// Auto-compact 阈值（达到此比例时触发自动压缩）
+// Auto-compact threshold (triggers compression when reached)
 const AUTO_COMPACT_THRESHOLD = 0.92; // 92%
 
-// ============ Token 计数 ============
+// Per-message overhead for role/formatting tokens
+const MESSAGE_OVERHEAD_TOKENS = 4;
+
+// Per-tool-call overhead for formatting
+const TOOL_CALL_OVERHEAD_TOKENS = 10;
+
+// ============ Token Counting ============
 
 /**
- * 简单的 token 计数器
- *
- * 注意：这是一个近似估算，实际 token 数可能因模型而异
- * 中文大约 1.5-2 字符/token，英文大约 4 字符/token
- *
- * @param text 文本内容
- * @returns 估算的 token 数
+ * Estimate token count for a text string.
+ * Chinese: ~1.5 chars/token, English/other: ~4 chars/token.
  */
 export function estimateTokens(text: string): number {
   if (!text) return 0;
 
-  // 分离中英文
   const chineseChars = (text.match(/[\u4e00-\u9fa5]/g) || []).length;
   const otherChars = text.length - chineseChars;
 
-  // 中文约 1.5 字符/token，英文约 4 字符/token
-  const chineseTokens = Math.ceil(chineseChars / 1.5);
-  const otherTokens = Math.ceil(otherChars / 4);
-
-  return chineseTokens + otherTokens;
+  return Math.ceil(chineseChars / 1.5) + Math.ceil(otherChars / 4);
 }
 
 /**
- * 计算消息数组的总 token 数
- *
- * @param messages 消息数组
- * @returns 估算的总 token 数
+ * Count total estimated tokens for a message array.
  */
 export function countMessageTokens(messages: BaseMessage[]): number {
   let totalTokens = 0;
 
   for (const msg of messages) {
-    // 基础开销（role, 格式等）
-    const overhead = 4;
-
-    // 内容 token
     const content = typeof msg.content === "string"
       ? msg.content
       : JSON.stringify(msg.content);
     const contentTokens = estimateTokens(content);
 
-    // 工具调用的额外 token
     let toolTokens = 0;
     if (msg instanceof AIMessage && msg.tool_calls?.length) {
       for (const tc of msg.tool_calls) {
         toolTokens += estimateTokens(tc.name);
         toolTokens += estimateTokens(JSON.stringify(tc.args));
-        toolTokens += 10; // 工具调用格式开销
+        toolTokens += TOOL_CALL_OVERHEAD_TOKENS;
       }
     }
 
-    totalTokens += overhead + contentTokens + toolTokens;
+    totalTokens += MESSAGE_OVERHEAD_TOKENS + contentTokens + toolTokens;
   }
 
   return totalTokens;
 }
 
-
-// ============ 消息总结 ============
-
-/**
- * 将消息转换为可读文本格式（用于 LLM 总结）
- */
-function messagesToText(messages: BaseMessage[]): string {
-  const lines: string[] = [];
-
-  for (const msg of messages) {
-    if (msg instanceof HumanMessage) {
-      const content = typeof msg.content === "string" ? msg.content : JSON.stringify(msg.content);
-      lines.push(`用户: ${content}`);
-    } else if (msg instanceof AIMessage) {
-      if (msg.tool_calls?.length) {
-        const toolNames = msg.tool_calls.map(tc => tc.name).join(", ");
-        lines.push(`助手: [调用工具: ${toolNames}]`);
-      } else {
-        const content = typeof msg.content === "string" ? msg.content : JSON.stringify(msg.content);
-        lines.push(`助手: ${content}`);
-      }
-    } else if (msg instanceof ToolMessage) {
-      const content = typeof msg.content === "string" ? msg.content : JSON.stringify(msg.content);
-      // 工具结果可能很长，截取前 500 字符
-      const preview = content.length > 500 ? content.slice(0, 500) + "..." : content;
-      lines.push(`工具[${msg.name}]结果: ${preview}`);
-    }
-  }
-
-  return lines.join("\n\n");
-}
-
+// ============ Compression Prompt ============
 
 /**
- * 构建用于自动压缩的综合总结 prompt
- *
- * @param messages 需要总结的消息
- * @returns 用于 LLM 的 prompt
+ * Structured summary prompt template.
+ * Single source of truth for compression format - used by both
+ * auto-compact (summarizeNode) and manual compact (/compact command).
  */
-export function buildComprehensiveSummaryPrompt(messages: BaseMessage[]): string {
-  const conversationText = messagesToText(messages);
-
-  return `Please provide a comprehensive summary of our conversation structured as follows:
+export const COMPRESSION_PROMPT = `Please provide a comprehensive summary of our conversation structured as follows:
 
 ## Technical Context
 Development environment, tools, frameworks, and configurations in use. Programming languages, libraries, and technical constraints. File structure, directory organization, and project architecture.
@@ -140,24 +93,30 @@ Coding style, formatting, and organizational preferences. Communication patterns
 ## Key Decisions
 Important technical decisions made and their rationale. Alternative approaches considered and why they were rejected. Trade-offs accepted and their implications.
 
-Focus on information essential for continuing the conversation effectively, including specific details about code, files, errors, and plans.
-
-Conversation:
-${conversationText}`;
-}
-
-// ============ Auto-Compact ============
+Focus on information essential for continuing the conversation effectively, including specific details about code, files, errors, and plans.`;
 
 /**
- * 计算上下文使用情况
+ * Build a complete summary prompt with conversation content.
  */
-export function getContextUsage(messages: BaseMessage[], modelName: string): {
+export function buildComprehensiveSummaryPrompt(messages: BaseMessage[]): string {
+  const conversationText = messagesToText(messages);
+  return `${COMPRESSION_PROMPT}\n\nConversation:\n${conversationText}`;
+}
+
+// ============ Context Usage ============
+
+export interface ContextUsage {
   tokenCount: number;
   contextLimit: number;
   percentUsed: number;
   isAboveAutoCompactThreshold: boolean;
   tokensRemaining: number;
-} {
+}
+
+/**
+ * Calculate context window usage for the given messages and model.
+ */
+export function getContextUsage(messages: BaseMessage[], modelName: string): ContextUsage {
   const contextLimit = getModelContextWindow(modelName);
   const tokenCount = countMessageTokens(messages);
   const autoCompactThreshold = contextLimit * AUTO_COMPACT_THRESHOLD;
@@ -173,4 +132,6 @@ export function getContextUsage(messages: BaseMessage[], modelName: string): {
 
 export const MEMORY_CONSTANTS = {
   AUTO_COMPACT_THRESHOLD,
+  MESSAGE_OVERHEAD_TOKENS,
+  TOOL_CALL_OVERHEAD_TOKENS,
 };

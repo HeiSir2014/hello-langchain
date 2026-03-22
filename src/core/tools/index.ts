@@ -10,6 +10,7 @@ import {
   SENSITIVE_TOOLS,
   MAX_TOOL_CONCURRENCY,
   getToolMetadata,
+  getToolDescriptions,
   isReadOnlyTool,
   isConcurrencySafeTool,
   needsPermission,
@@ -77,31 +78,12 @@ export {
   SENSITIVE_TOOLS,
   MAX_TOOL_CONCURRENCY,
   getToolMetadata,
+  getToolDescriptions,
   isReadOnlyTool,
   isConcurrencySafeTool,
   needsPermission,
   canRunToolsConcurrently,
 };
 
-// 工具描述（用于帮助信息）
-export const toolDescriptions = [
-  { name: "Bash", description: "Execute shell commands (supports background execution)", readOnly: false },
-  { name: "BashOutput", description: "Get output from background shell", readOnly: true },
-  { name: "KillShell", description: "Kill a running background shell", readOnly: false },
-  { name: "Read", description: "Read file contents (with line numbers)", readOnly: true },
-  { name: "Write", description: "Write content to file", readOnly: false },
-  { name: "Edit", description: "Edit file (string replacement)", readOnly: false },
-  { name: "Glob", description: "File pattern matching search (e.g. **/*.ts)", readOnly: true },
-  { name: "Grep", description: "Search text in file contents (ripgrep)", readOnly: true },
-  { name: "LS", description: "List directory contents", readOnly: true },
-  { name: "TodoWrite", description: "Manage task list for tracking progress", readOnly: false },
-  { name: "WebSearch", description: "Search the web using DuckDuckGo", readOnly: true },
-  { name: "WebFetch", description: "Fetch and analyze content from a URL", readOnly: true },
-  { name: "Location", description: "Get current location based on IP address", readOnly: true },
-  { name: "Weather", description: "Get weather information for a location in China", readOnly: true },
-  { name: "MemorySave", description: "Save important information to persistent memory (MEMORY.md or daily log)", readOnly: false },
-  { name: "MemorySearch", description: "Search across all persistent memory files", readOnly: true },
-  { name: "ExitPlanMode", description: "Exit plan mode and return to normal mode (plan mode only)", readOnly: false, planModeOnly: true },
-  { name: "SavePlan", description: "Save implementation plan to a markdown file", readOnly: false },
-  { name: "ReadPlan", description: "Read an existing plan file", readOnly: true },
-];
+// Tool descriptions derived from TOOL_METADATA (single source of truth)
+export const toolDescriptions = getToolDescriptions();

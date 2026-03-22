@@ -16,6 +16,8 @@ export type { StructuredToolInterface };
  * Tool metadata for enhanced execution control
  */
 export interface ToolMetadata {
+  /** Human-readable description for help/UI */
+  description: string;
   /** Tool is read-only and safe to run concurrently */
   isReadOnly: boolean;
   /** Tool is safe to run concurrently with other tools */
@@ -23,154 +25,191 @@ export interface ToolMetadata {
   /** Tool requires user permission before execution */
   needsPermission: boolean;
   /** Tool category for grouping */
-  category: "file" | "bash" | "search" | "task" | "other";
+  category: "file" | "bash" | "search" | "task" | "plan" | "memory" | "other";
+  /** Only available in plan mode */
+  planModeOnly?: boolean;
 }
 
 /**
  * Map of tool names to their metadata
  */
 export const TOOL_METADATA: Record<string, ToolMetadata> = {
-  // Read-only tools - safe to run concurrently
+  // File tools
   Read: {
+    description: "Read file contents (with line numbers)",
     isReadOnly: true,
     isConcurrencySafe: true,
     needsPermission: false,
     category: "file",
   },
-  Glob: {
-    isReadOnly: true,
-    isConcurrencySafe: true,
-    needsPermission: false,
-    category: "search",
-  },
-  Grep: {
-    isReadOnly: true,
-    isConcurrencySafe: true,
-    needsPermission: false,
-    category: "search",
-  },
-  LS: {
-    isReadOnly: true,
-    isConcurrencySafe: true,
-    needsPermission: false,
-    category: "file",
-  },
-  BashOutput: {
-    isReadOnly: true,
-    isConcurrencySafe: true,
-    needsPermission: false,
-    category: "bash",
-  },
-
-  // Write tools - need permission, not concurrent safe
   Write: {
+    description: "Write content to file",
     isReadOnly: false,
     isConcurrencySafe: false,
     needsPermission: true,
     category: "file",
   },
   Edit: {
+    description: "Edit file (string replacement)",
     isReadOnly: false,
     isConcurrencySafe: false,
     needsPermission: true,
     category: "file",
   },
-
-  // Bash tools - need permission, not concurrent safe
-  Bash: {
-    isReadOnly: false,
-    isConcurrencySafe: false,
-    needsPermission: true,
-    category: "bash",
-  },
-  KillShell: {
-    isReadOnly: false,
-    isConcurrencySafe: false,
-    needsPermission: false,
-    category: "bash",
-  },
-
-  // Task management - no permission needed, concurrent safe
-  TodoWrite: {
-    isReadOnly: false,
+  LS: {
+    description: "List directory contents",
+    isReadOnly: true,
     isConcurrencySafe: true,
     needsPermission: false,
-    category: "task",
+    category: "file",
   },
 
-  // Web tools - read-only, concurrent safe, no permission needed
+  // Search tools
+  Glob: {
+    description: "File pattern matching search (e.g. **/*.ts)",
+    isReadOnly: true,
+    isConcurrencySafe: true,
+    needsPermission: false,
+    category: "search",
+  },
+  Grep: {
+    description: "Search text in file contents (ripgrep)",
+    isReadOnly: true,
+    isConcurrencySafe: true,
+    needsPermission: false,
+    category: "search",
+  },
   WebSearch: {
+    description: "Search the web using DuckDuckGo",
     isReadOnly: true,
     isConcurrencySafe: true,
     needsPermission: false,
     category: "search",
   },
   WebFetch: {
+    description: "Fetch and analyze content from a URL",
     isReadOnly: true,
     isConcurrencySafe: true,
     needsPermission: false,
     category: "search",
   },
+  MemorySearch: {
+    description: "Search across all persistent memory files",
+    isReadOnly: true,
+    isConcurrencySafe: true,
+    needsPermission: false,
+    category: "memory",
+  },
+
+  // Bash tools
+  Bash: {
+    description: "Execute shell commands (supports background execution)",
+    isReadOnly: false,
+    isConcurrencySafe: false,
+    needsPermission: true,
+    category: "bash",
+  },
+  BashOutput: {
+    description: "Get output from background shell",
+    isReadOnly: true,
+    isConcurrencySafe: true,
+    needsPermission: false,
+    category: "bash",
+  },
+  KillShell: {
+    description: "Kill a running background shell",
+    isReadOnly: false,
+    isConcurrencySafe: false,
+    needsPermission: false,
+    category: "bash",
+  },
+
+  // Task management
+  TodoWrite: {
+    description: "Manage task list for tracking progress",
+    isReadOnly: false,
+    isConcurrencySafe: true,
+    needsPermission: false,
+    category: "task",
+  },
+
+  // Memory tools
+  MemorySave: {
+    description: "Save important information to persistent memory (MEMORY.md or daily log)",
+    isReadOnly: false,
+    isConcurrencySafe: true,
+    needsPermission: false,
+    category: "memory",
+  },
+
+  // Other tools
   Location: {
+    description: "Get current location based on IP address",
     isReadOnly: true,
     isConcurrencySafe: true,
     needsPermission: false,
     category: "other",
   },
   Weather: {
+    description: "Get weather information for a location in China",
     isReadOnly: true,
     isConcurrencySafe: true,
     needsPermission: false,
     category: "other",
-  },
-
-  // Memory tools
-  MemorySave: {
-    isReadOnly: false,
-    isConcurrencySafe: true,
-    needsPermission: false,
-    category: "other",
-  },
-  MemorySearch: {
-    isReadOnly: true,
-    isConcurrencySafe: true,
-    needsPermission: false,
-    category: "search",
   },
 
   // Plan mode tools
   ExitPlanMode: {
+    description: "Exit plan mode and return to normal mode (plan mode only)",
     isReadOnly: false,
     isConcurrencySafe: false,
     needsPermission: false,
-    category: "other",
+    category: "plan",
+    planModeOnly: true,
   },
   SavePlan: {
+    description: "Save implementation plan to a markdown file",
     isReadOnly: false,
     isConcurrencySafe: false,
     needsPermission: false,
-    category: "other",
+    category: "plan",
   },
   ReadPlan: {
+    description: "Read an existing plan file",
     isReadOnly: true,
     isConcurrencySafe: true,
     needsPermission: false,
-    category: "other",
+    category: "plan",
   },
 };
 
 /**
- * Get metadata for a tool by name
+ * Get metadata for a tool by name.
+ * Returns restrictive defaults for unknown tools.
  */
 export function getToolMetadata(toolName: string): ToolMetadata {
   return (
     TOOL_METADATA[toolName] || {
+      description: toolName,
       isReadOnly: false,
       isConcurrencySafe: false,
       needsPermission: true,
       category: "other",
     }
   );
+}
+
+/**
+ * Get tool descriptions for help/UI display.
+ * Derived from TOOL_METADATA - single source of truth.
+ */
+export function getToolDescriptions(): Array<{ name: string; description: string; readOnly: boolean; planModeOnly?: boolean }> {
+  return Object.entries(TOOL_METADATA).map(([name, meta]) => ({
+    name,
+    description: meta.description,
+    readOnly: meta.isReadOnly,
+    ...(meta.planModeOnly && { planModeOnly: true }),
+  }));
 }
 
 /**

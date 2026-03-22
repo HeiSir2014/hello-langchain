@@ -17,6 +17,7 @@ import type { RunnableConfig } from "@langchain/core/runnables";
 import { log } from "../../logger.js";
 import { getChatModel } from "./models.js";
 import { createCheckpointer, type Checkpointer } from "./checkpointer.js";
+import { extractTextContent } from "../utils/messages.js";
 import {
   emitThinking,
   emitResponse,
@@ -148,23 +149,6 @@ function getSupervisorGraph(modelName: string) {
 // ============ Stream Event Handling ============
 
 /**
- * Extract text from message content (handles string and array formats)
- */
-function extractTextContent(content: any): string {
-  if (typeof content === "string") return content;
-  if (Array.isArray(content)) {
-    return content
-      .map((part) => {
-        if (typeof part === "string") return part;
-        if (part && typeof part === "object" && "text" in part) return part.text;
-        return "";
-      })
-      .join("");
-  }
-  return String(content);
-}
-
-/**
  * Handle stream updates from the supervisor graph.
  * Emits UI events for tool use, tool results, and responses.
  */
@@ -247,9 +231,35 @@ export function abortSupervisorRequest(): boolean {
   return aborted;
 }
 
+// Maximum retries for transient errors (network, rate limits)
+const MAX_RETRIES = 3;
+const RETRY_DELAYS = [1000, 2000, 4000]; // exponential backoff
+
+/**
+ * Check if an error is transient and worth retrying.
+ */
+function isRetryableError(error: any): boolean {
+  if (!error) return false;
+  const msg = error.message?.toLowerCase() || "";
+  const code = error.code || error.status || 0;
+  // Network errors, rate limits, server errors
+  return (
+    msg.includes("network") ||
+    msg.includes("econnrefused") ||
+    msg.includes("econnreset") ||
+    msg.includes("timeout") ||
+    msg.includes("rate limit") ||
+    msg.includes("429") ||
+    code === 429 ||
+    code === 502 ||
+    code === 503 ||
+    code === 504
+  );
+}
+
 /**
  * Run the supervisor graph with streaming, emitting events for UI.
- * This is the primary entry point used by multiTurnChat in supervisor mode.
+ * Includes retry logic for transient errors (network, rate limits).
  */
 export async function runSupervisorStream(
   input: { messages: BaseMessage[] },
@@ -269,46 +279,76 @@ export async function runSupervisorStream(
   log.info("Supervisor stream started", { threadId, modelName });
   emitThinking(modelName);
 
-  const stream = await graph.stream(
-    input,
-    {
-      ...config,
-      streamMode: "updates",
-      signal,
-    },
-  );
-
   let allMessages: BaseMessage[] = input.messages ? [...input.messages] : [];
   let nodeCount = 0;
   let wasInterrupted = false;
+  let lastError: any = null;
 
-  try {
-    for await (const chunk of stream) {
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    if (attempt > 0) {
+      const delay = RETRY_DELAYS[attempt - 1] || 4000;
+      log.info("Retrying supervisor stream", { attempt, delay, error: lastError?.message });
+      await new Promise(resolve => setTimeout(resolve, delay));
       if (signal.aborted) {
-        log.info("Supervisor stream aborted by user");
-        wasInterrupted = true;
-        break;
+        return { messages: allMessages, interrupted: true };
       }
+      emitThinking(modelName);
+    }
 
-      for (const [nodeName, update] of Object.entries(chunk)) {
-        nodeCount++;
-        log.debug("Processing supervisor stream chunk", { nodeCount, nodeName });
-        handleSupervisorStreamUpdate(nodeName, update);
+    try {
+      const stream = await graph.stream(
+        attempt === 0 ? input : null, // Only send input on first attempt; retries resume from checkpoint
+        {
+          ...config,
+          streamMode: "updates",
+          signal,
+        },
+      );
 
-        if ((update as any).messages) {
-          allMessages = [...allMessages, ...(update as any).messages];
+      for await (const chunk of stream) {
+        if (signal.aborted) {
+          log.info("Supervisor stream aborted by user");
+          wasInterrupted = true;
+          break;
+        }
+
+        for (const [nodeName, update] of Object.entries(chunk)) {
+          nodeCount++;
+          log.debug("Processing supervisor stream chunk", { nodeCount, nodeName });
+          handleSupervisorStreamUpdate(nodeName, update);
+
+          if ((update as any).messages) {
+            allMessages = [...allMessages, ...(update as any).messages];
+          }
         }
       }
+
+      // Success - break out of retry loop
+      lastError = null;
+      break;
+    } catch (error: any) {
+      if (error.name === "AbortError" || signal.aborted) {
+        log.info("Supervisor request aborted");
+        return { messages: allMessages, interrupted: true };
+      }
+
+      lastError = error;
+
+      if (isRetryableError(error) && attempt < MAX_RETRIES) {
+        log.warn("Supervisor stream transient error, will retry", {
+          attempt,
+          error: error.message,
+        });
+        continue;
+      }
+
+      // Non-retryable or max retries exhausted
+      log.error("Supervisor stream failed", { error: error.message, attempts: attempt + 1 });
+      throw error;
     }
-  } catch (error: any) {
-    if (error.name === "AbortError" || signal.aborted) {
-      log.info("Supervisor request aborted");
-      return { messages: allMessages, interrupted: true };
-    }
-    throw error;
-  } finally {
-    supervisorAbortController = null;
   }
+
+  supervisorAbortController = null;
 
   const durationMs = Date.now() - startTime;
   log.info("Supervisor stream completed", {
