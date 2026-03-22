@@ -18,7 +18,6 @@ import plan from './plan.js';
 import exitPlan from './exitPlan.js';
 import skill from './skill.js';
 import resume from './resume.js';
-import supervisor from './supervisor.js';
 import { loadCustomCommands, clearCustomCommandsCache } from './customLoader.js';
 
 /**
@@ -129,7 +128,6 @@ const BUILT_IN_COMMANDS: Command[] = [
   exitPlan,
   skill,
   resume,
-  supervisor,
 ];
 
 /**

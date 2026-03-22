@@ -6,7 +6,7 @@ import React from 'react';
 import { render } from 'ink';
 import { Command } from 'commander';
 import { App } from './ui/app.js';
-import { getDefaultModel, initializeModels, initializeModelsSync, listModels } from './core/config.js';
+import { getDefaultModel, initializeModels, initializeModelsSync, getModelsListData, formatModelsList } from './core/config.js';
 import { clearTerminal } from './ui/utils/terminal.js';
 import { PersistentShell } from './core/utils/PersistentShell.js';
 import { getLatestSession, loadSession, restoreSession } from './core/session/index.js';
@@ -55,7 +55,7 @@ async function main() {
   // Handle --list flag (needs full model list)
   if (options.list) {
     await initializeModels(); // Wait for full model list
-    listModels();
+    console.log(formatModelsList(getModelsListData()));
     process.exit(0);
   }
 

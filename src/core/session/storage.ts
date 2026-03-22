@@ -14,7 +14,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync, unlinkSync } from "fs";
 import { join } from "path";
 import { homedir } from "os";
-import type { MessageItem } from "../../ui/types/messages.js";
+import type { MessageItem } from "../types/messages.js";
 import type { BaseMessage } from "@langchain/core/messages";
 import { log } from "../../logger.js";
 

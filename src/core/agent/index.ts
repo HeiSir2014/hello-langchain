@@ -33,7 +33,8 @@ import {
   getCommandPrefix,
   saveToolPermission,
 } from "../permissions.js";
-import { isSafeModeEnabled, getPermissionMode, isToolAllowedInCurrentMode, PLAN_MODE_TOOLS } from "../settings.js";
+import { isSafeModeEnabled, getPermissionMode, isToolAllowedInCurrentMode, PLAN_MODE_TOOLS, getAgentMode } from "../settings.js";
+import { runSupervisorStream, abortSupervisorRequest, resetSupervisorGraph } from "./supervisor.js";
 import { callChatModel, simpleChatWithModel } from "./models.js";
 import { getDefaultModel, getModelConfig, supportsToolCalling } from "../config.js";
 import { log } from "../../logger.js";
@@ -150,6 +151,8 @@ export function setAgentModel(model: string): void {
   const oldModel = currentModel;
   currentModel = model;
   log.info("Model changed", { from: oldModel, to: model });
+  // Reset supervisor graph so it rebuilds with the new model
+  resetSupervisorGraph();
 }
 
 export function getAgentModel(): string {
@@ -964,9 +967,14 @@ let currentAbortController: AbortController | null = null;
 export function abortCurrentRequest(): boolean {
   let aborted = false;
 
-  // 取消图执行
+  // 取消图执行（single mode）
   if (currentAbortController && !currentAbortController.signal.aborted) {
     currentAbortController.abort();
+    aborted = true;
+  }
+
+  // 取消 supervisor 模式的请求
+  if (abortSupervisorRequest()) {
     aborted = true;
   }
 
@@ -1115,17 +1123,31 @@ export async function chat(message: string): Promise<string> {
 
 // 多轮对话（使用 checkpointer 持久化）
 export async function multiTurnChat(message: string): Promise<string> {
+  const agentMode = getAgentMode();
   log.info("Multi-turn chat started", {
     messageLength: message.length,
     threadId: currentThreadId,
+    agentMode,
   });
   log.userInput(message);
 
   isAgentBusy = true;
   try {
-    const result = await runGraphWithStream({
-      messages: [new HumanMessage(message)],
-    });
+    let result: { messages: BaseMessage[]; interrupted: boolean };
+
+    if (agentMode === "supervisor") {
+      // Multi-agent supervisor mode
+      result = await runSupervisorStream(
+        { messages: [new HumanMessage(message)] },
+        currentThreadId,
+        currentModel,
+      );
+    } else {
+      // Single agent mode (legacy)
+      result = await runGraphWithStream({
+        messages: [new HumanMessage(message)],
+      });
+    }
 
     const lastMessage = result.messages[result.messages.length - 1];
     // Handle case where lastMessage is undefined (e.g., after abort)
@@ -1142,6 +1164,7 @@ export async function multiTurnChat(message: string): Promise<string> {
       responseLength: response.length,
       totalMessages: result.messages.length,
       threadId: currentThreadId,
+      agentMode,
     });
 
     // Emit done event with interrupted flag

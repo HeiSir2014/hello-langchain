@@ -356,14 +356,15 @@ export async function initializeModels(): Promise<void> {
       anthropicModels
     );
 
-    console.log(`Loaded models:`);
-    console.log(`  Ollama: ${LOCAL_MODELS.length} local + ${CLOUD_MODELS.length} cloud`);
-    console.log(`  OpenRouter: ${OPENROUTER_MODELS.length}`);
-    console.log(`  OpenAI: ${OPENAI_MODELS.length}`);
-    console.log(`  Anthropic: ${ANTHROPIC_MODELS.length}`);
-    console.log(`  Total: ${ALL_MODELS.length} models`);
+    log.info("Loaded models", {
+      ollama: `${LOCAL_MODELS.length} local + ${CLOUD_MODELS.length} cloud`,
+      openRouter: OPENROUTER_MODELS.length,
+      openAI: OPENAI_MODELS.length,
+      anthropic: ANTHROPIC_MODELS.length,
+      total: ALL_MODELS.length,
+    });
   } catch (error: any) {
-    console.error("Failed to initialize models:", error.message);
+    log.error("Failed to initialize models", { error: error.message });
   }
 }
 
@@ -386,9 +387,9 @@ export async function refreshAllModels(): Promise<void> {
     // 重新初始化
     await initializeModels();
     
-    console.log("All models refreshed successfully");
+    log.info("All models refreshed successfully");
   } catch (error: any) {
-    console.error("Failed to refresh models:", error.message);
+    log.error("Failed to refresh models", { error: error.message });
   }
 }
 
@@ -444,33 +445,55 @@ export function getModelContextWindow(name: string): number {
   return config?.contextWindow ?? DEFAULT_CONTEXT_WINDOW;
 }
 
-// 列出所有模型
-export function listModels(): void {
-  const currentProvider = getUseProvider();
-  const currentModel = getDefaultModel();
-  console.log(`\nProvider: ${currentProvider}`);
-  console.log(`Default Model: ${currentModel}`);
-  console.log(`\nAvailable Models:`);
+// 模型列表数据结构
+export interface ModelListData {
+  currentProvider: string;
+  currentModel: string;
+  categories: { name: string; models: ModelConfig[] }[];
+  totals: { local: number; cloud: number; all: number };
+}
 
-  const printModels = (models: ModelConfig[], category: string) => {
-    if (models.length === 0) return;
-    console.log(`\n[${category}]`);
-    models.forEach((m) => {
+// 获取模型列表的结构化数据
+export function getModelsListData(): ModelListData {
+  return {
+    currentProvider: getUseProvider(),
+    currentModel: getDefaultModel(),
+    categories: [
+      { name: "Ollama Local", models: LOCAL_MODELS },
+      { name: "Ollama Cloud", models: CLOUD_MODELS },
+      { name: "OpenRouter", models: OPENROUTER_MODELS },
+      { name: "OpenAI", models: OPENAI_MODELS },
+      { name: "Anthropic", models: ANTHROPIC_MODELS },
+    ].filter(c => c.models.length > 0),
+    totals: {
+      local: LOCAL_MODELS.length,
+      cloud: CLOUD_MODELS.length + OPENROUTER_MODELS.length + OPENAI_MODELS.length + ANTHROPIC_MODELS.length,
+      all: ALL_MODELS.length,
+    },
+  };
+}
+
+// 格式化模型列表为字符串（供 CLI 输出）
+export function formatModelsList(data: ModelListData): string {
+  const lines: string[] = [];
+  lines.push(`\nProvider: ${data.currentProvider}`);
+  lines.push(`Default Model: ${data.currentModel}`);
+  lines.push(`\nAvailable Models:`);
+
+  for (const category of data.categories) {
+    lines.push(`\n[${category.name}]`);
+    for (const m of category.models) {
       const toolIcon = m.supportsTools ? "🔧" : "  ";
       const ctx = m.contextWindow ? ` (${Math.round(m.contextWindow / 1000)}K ctx)` : "";
-      console.log(`  ${toolIcon} ${m.name.padEnd(25)} ${m.description || m.model}${ctx}`);
-    });
-  };
+      lines.push(`  ${toolIcon} ${m.name.padEnd(25)} ${m.description || m.model}${ctx}`);
+    }
+  }
 
-  printModels(LOCAL_MODELS, "Ollama Local");
-  printModels(CLOUD_MODELS, "Ollama Cloud");
-  printModels(OPENROUTER_MODELS, "OpenRouter");
-  printModels(OPENAI_MODELS, "OpenAI");
-  printModels(ANTHROPIC_MODELS, "Anthropic");
+  lines.push("\n🔧 = supports tool calling");
+  lines.push("\nTotal Models:");
+  lines.push(`  Local: ${data.totals.local}`);
+  lines.push(`  Cloud: ${data.totals.cloud}`);
+  lines.push(`  All: ${data.totals.all}\n`);
 
-  console.log("\n🔧 = supports tool calling");
-  console.log("\nTotal Models:");
-  console.log(`  Local: ${LOCAL_MODELS.length}`);
-  console.log(`  Cloud: ${CLOUD_MODELS.length + OPENROUTER_MODELS.length + OPENAI_MODELS.length + ANTHROPIC_MODELS.length}`);
-  console.log(`  All: ${ALL_MODELS.length}\n`);
+  return lines.join("\n");
 }

@@ -33,6 +33,13 @@ export type ProviderType = "OLLAMA" | "OPENROUTER" | "OPENAI" | "ANTHROPIC";
 export type PermissionMode = "default" | "acceptEdits" | "plan" | "bypassPermissions";
 
 /**
+ * Agent mode
+ * - supervisor: Multi-agent supervisor mode (default) - researcher + coder coordination
+ * - single: Single agent mode - traditional single LLM agent
+ */
+export type AgentMode = "supervisor" | "single";
+
+/**
  * Permission mode configuration
  */
 export interface PermissionModeConfig {
@@ -128,6 +135,10 @@ export interface Settings {
   /** Current permission mode */
   permissionMode: PermissionMode;
 
+  // Agent mode
+  /** Agent execution mode - supervisor (multi-agent) or single */
+  agentMode: AgentMode;
+
   // Ollama configuration
   ollama: {
     host: string;
@@ -169,6 +180,9 @@ const DEFAULT_SETTINGS: Settings = {
   // Permission defaults - safe mode enabled by default
   safeMode: true,
   permissionMode: "default",
+
+  // Agent mode - supervisor (multi-agent) by default
+  agentMode: "supervisor",
 
   ollama: {
     host: "http://localhost:11434",
@@ -241,6 +255,7 @@ function mergeWithEnv(fileSettings: Partial<Settings> | null): Settings {
     if (fileSettings.provider) settings.provider = fileSettings.provider;
     if (fileSettings.safeMode !== undefined) settings.safeMode = fileSettings.safeMode;
     if (fileSettings.permissionMode) settings.permissionMode = fileSettings.permissionMode;
+    if (fileSettings.agentMode) settings.agentMode = fileSettings.agentMode;
 
     if (fileSettings.ollama) {
       Object.assign(settings.ollama, fileSettings.ollama);
@@ -259,6 +274,9 @@ function mergeWithEnv(fileSettings: Partial<Settings> | null): Settings {
   // Apply environment variables (highest priority - override file settings)
   if (env.USE_PROVIDER) {
     settings.provider = env.USE_PROVIDER.toUpperCase() as ProviderType;
+  }
+  if (env.AGENT_MODE) {
+    settings.agentMode = env.AGENT_MODE.toLowerCase() as AgentMode;
   }
 
   // Ollama
@@ -613,4 +631,18 @@ export function getAllowedToolsForCurrentMode(): string[] | null {
 export function isReadOnlyMode(): boolean {
   const mode = getPermissionMode();
   return MODE_CONFIGS[mode].readOnly === true;
+}
+
+/**
+ * Get current agent mode
+ */
+export function getAgentMode(): AgentMode {
+  return getSettings().agentMode;
+}
+
+/**
+ * Set agent mode
+ */
+export function setAgentMode(mode: AgentMode): void {
+  saveSettings({ agentMode: mode });
 }

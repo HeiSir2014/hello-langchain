@@ -6,21 +6,29 @@
  * - researcher: Read-only codebase exploration and web research
  * - coder: File operations and bash commands for implementation
  *
- * This enables complex tasks to be broken into research and implementation phases,
- * with the supervisor orchestrating the workflow.
+ * This is the default agent mode. The supervisor graph is used directly in
+ * multiTurnChat() when agentMode is "supervisor".
  */
 
 import { createSupervisor } from "@langchain/langgraph-supervisor";
 import { createReactAgent } from "@langchain/langgraph/prebuilt";
-import { HumanMessage, type BaseMessage } from "@langchain/core/messages";
+import { AIMessage, HumanMessage, ToolMessage, type BaseMessage } from "@langchain/core/messages";
+import type { RunnableConfig } from "@langchain/core/runnables";
 import { log } from "../../logger.js";
 import { getChatModel } from "./models.js";
-import { getAgentModel } from "./index.js";
-import { createCheckpointer } from "./checkpointer.js";
+import { createCheckpointer, type Checkpointer } from "./checkpointer.js";
 import {
   emitThinking,
   emitResponse,
+  emitToolUse,
+  emitToolResult,
+  emitError,
   emitDone,
+  createToolAbortController,
+  clearToolAbortController,
+  setCurrentToolCallId,
+  clearToolCallIds,
+  abortToolExecution,
 } from "./events.js";
 
 // Import tools by category
@@ -36,8 +44,8 @@ import { TodoWrite } from "../tools/todo.js";
  * Create the researcher agent - specialized in codebase exploration and web research.
  * Only has read-only tools.
  */
-function createResearcherAgent() {
-  const model = getChatModel(getAgentModel());
+function createResearcherAgent(modelName: string) {
+  const model = getChatModel(modelName);
 
   return createReactAgent({
     llm: model,
@@ -58,8 +66,8 @@ Always provide specific file paths and code references in your findings.`,
  * Create the coder agent - specialized in code implementation.
  * Has file write and bash tools.
  */
-function createCoderAgent() {
-  const model = getChatModel(getAgentModel());
+function createCoderAgent(modelName: string) {
+  const model = getChatModel(modelName);
 
   return createReactAgent({
     llm: model,
@@ -96,17 +104,30 @@ const SUPERVISOR_PROMPT = `You are a project supervisor coordinating a team of s
 - Provide clear, specific instructions to each agent
 - Synthesize findings from the researcher before passing to the coder
 - Track overall progress and ensure all requirements are met
-- If an agent reports an issue, adjust the plan accordingly`;
+- If an agent reports an issue, adjust the plan accordingly
+- For simple questions or conversations, respond directly without delegating`;
+
+// ============ Singleton Graph & State ============
+
+// Supervisor graph (lazy init, persisted across calls for multi-turn)
+let supervisorGraph: ReturnType<ReturnType<typeof createSupervisor>["compile"]> | null = null;
+let supervisorCheckpointer: Checkpointer | null = null;
+let supervisorModelName: string | null = null;
 
 /**
- * Build the multi-agent supervisor graph.
- * Returns a compiled graph ready for invocation.
+ * Get or create the supervisor graph.
+ * Rebuilds if model has changed.
  */
-export function buildSupervisorGraph() {
-  const model = getChatModel(getAgentModel());
+function getSupervisorGraph(modelName: string) {
+  if (supervisorGraph && supervisorModelName === modelName) {
+    return supervisorGraph;
+  }
 
-  const researcher = createResearcherAgent();
-  const coder = createCoderAgent();
+  log.info("Building supervisor graph", { model: modelName });
+
+  const model = getChatModel(modelName);
+  const researcher = createResearcherAgent(modelName);
+  const coder = createCoderAgent(modelName);
 
   const workflow = createSupervisor({
     agents: [researcher, coder] as any,
@@ -115,72 +136,197 @@ export function buildSupervisorGraph() {
     outputMode: "last_message",
   });
 
-  const checkpointer = createCheckpointer();
-  return workflow.compile({ checkpointer });
+  if (!supervisorCheckpointer) {
+    supervisorCheckpointer = createCheckpointer();
+  }
+
+  supervisorGraph = workflow.compile({ checkpointer: supervisorCheckpointer });
+  supervisorModelName = modelName;
+  return supervisorGraph;
+}
+
+// ============ Stream Event Handling ============
+
+/**
+ * Extract text from message content (handles string and array formats)
+ */
+function extractTextContent(content: any): string {
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    return content
+      .map((part) => {
+        if (typeof part === "string") return part;
+        if (part && typeof part === "object" && "text" in part) return part.text;
+        return "";
+      })
+      .join("");
+  }
+  return String(content);
+}
+
+/**
+ * Handle stream updates from the supervisor graph.
+ * Emits UI events for tool use, tool results, and responses.
+ */
+function handleSupervisorStreamUpdate(nodeName: string, update: any): void {
+  log.debug("Supervisor stream update", {
+    node: nodeName,
+    messageCount: update.messages?.length || 0,
+  });
+
+  if (!update.messages) return;
+
+  for (const msg of update.messages) {
+    // AI messages - emit response and/or tool use events
+    if (AIMessage.isInstance(msg)) {
+      const content = extractTextContent(msg.content);
+      if (content && content.trim()) {
+        emitResponse(content);
+      }
+
+      const toolCalls = msg.tool_calls;
+      if (toolCalls && toolCalls.length > 0) {
+        log.info("Supervisor agent requesting tool calls", {
+          node: nodeName,
+          toolCount: toolCalls.length,
+          tools: toolCalls.map((tc: any) => tc.name),
+        });
+
+        createToolAbortController();
+        for (const tc of toolCalls) {
+          const toolCallId = tc.id || `tool_${Date.now()}`;
+          setCurrentToolCallId(tc.name, toolCallId);
+          emitToolUse(tc.name, tc.args as Record<string, unknown>, toolCallId);
+        }
+      }
+    }
+
+    // Tool messages - emit tool result events
+    if (msg instanceof ToolMessage) {
+      clearToolAbortController();
+      clearToolCallIds();
+
+      const content = typeof msg.content === "string" ? msg.content : JSON.stringify(msg.content);
+      log.info("Supervisor tool result", {
+        tool: msg.name || "unknown",
+        resultLength: content.length,
+      });
+      emitToolResult(msg.name || "tool", content, msg.tool_call_id || `result_${Date.now()}`);
+    }
+  }
 }
 
 // ============ Public API ============
 
-export interface SupervisorResult {
-  success: boolean;
-  message: string;
+interface SupervisorStreamResult {
   messages: BaseMessage[];
+  interrupted: boolean;
+}
+
+// AbortController for current supervisor request
+let supervisorAbortController: AbortController | null = null;
+
+/**
+ * Abort current supervisor request
+ */
+export function abortSupervisorRequest(): boolean {
+  let aborted = false;
+
+  if (supervisorAbortController && !supervisorAbortController.signal.aborted) {
+    supervisorAbortController.abort();
+    aborted = true;
+  }
+
+  if (abortToolExecution()) {
+    aborted = true;
+  }
+
+  if (aborted) {
+    log.info("Supervisor request aborted by user");
+  }
+  return aborted;
 }
 
 /**
- * Run the multi-agent supervisor for complex tasks.
- *
- * @param userRequest - The user's task description
- * @param threadId - Optional thread ID for conversation persistence
+ * Run the supervisor graph with streaming, emitting events for UI.
+ * This is the primary entry point used by multiTurnChat in supervisor mode.
  */
-export async function runSupervisor(
-  userRequest: string,
-  threadId?: string
-): Promise<SupervisorResult> {
-  log.info("Starting supervisor", { userRequest: userRequest.slice(0, 100) });
+export async function runSupervisorStream(
+  input: { messages: BaseMessage[] },
+  threadId: string,
+  modelName: string,
+): Promise<SupervisorStreamResult> {
+  const startTime = Date.now();
+  supervisorAbortController = new AbortController();
+  const signal = supervisorAbortController.signal;
+
+  const graph = getSupervisorGraph(modelName);
+  const config: RunnableConfig = {
+    configurable: { thread_id: threadId },
+    recursionLimit: Number.MAX_SAFE_INTEGER,
+  };
+
+  log.info("Supervisor stream started", { threadId, modelName });
+  emitThinking(modelName);
+
+  const stream = await graph.stream(
+    input,
+    {
+      ...config,
+      streamMode: "updates",
+      signal,
+    },
+  );
+
+  let allMessages: BaseMessage[] = input.messages ? [...input.messages] : [];
+  let nodeCount = 0;
+  let wasInterrupted = false;
 
   try {
-    emitThinking("Coordinating agents...");
+    for await (const chunk of stream) {
+      if (signal.aborted) {
+        log.info("Supervisor stream aborted by user");
+        wasInterrupted = true;
+        break;
+      }
 
-    const graph = buildSupervisorGraph();
-    const config = threadId
-      ? { configurable: { thread_id: threadId } }
-      : undefined;
+      for (const [nodeName, update] of Object.entries(chunk)) {
+        nodeCount++;
+        log.debug("Processing supervisor stream chunk", { nodeCount, nodeName });
+        handleSupervisorStreamUpdate(nodeName, update);
 
-    const result = await graph.invoke(
-      {
-        messages: [new HumanMessage(userRequest)],
-      },
-      config
-    );
-
-    const messages: BaseMessage[] = result.messages || [];
-
-    // Extract the final supervisor response
-    const lastMsg = messages[messages.length - 1];
-    const content = lastMsg
-      ? (typeof lastMsg.content === "string" ? lastMsg.content : String(lastMsg.content))
-      : "Task completed.";
-
-    emitResponse(content);
-    emitDone();
-
-    log.info("Supervisor completed", {
-      totalMessages: messages.length,
-    });
-
-    return {
-      success: true,
-      message: content,
-      messages,
-    };
+        if ((update as any).messages) {
+          allMessages = [...allMessages, ...(update as any).messages];
+        }
+      }
+    }
   } catch (error: any) {
-    log.error("Supervisor failed", { error: error.message });
-    emitDone();
-    return {
-      success: false,
-      message: `Supervisor failed: ${error.message}`,
-      messages: [],
-    };
+    if (error.name === "AbortError" || signal.aborted) {
+      log.info("Supervisor request aborted");
+      return { messages: allMessages, interrupted: true };
+    }
+    throw error;
+  } finally {
+    supervisorAbortController = null;
   }
+
+  const durationMs = Date.now() - startTime;
+  log.info("Supervisor stream completed", {
+    threadId,
+    totalMessages: allMessages.length,
+    nodesExecuted: nodeCount,
+    durationMs,
+    wasInterrupted,
+  });
+
+  return { messages: allMessages, interrupted: wasInterrupted };
+}
+
+/**
+ * Reset the supervisor graph (e.g., when model changes)
+ */
+export function resetSupervisorGraph(): void {
+  supervisorGraph = null;
+  supervisorModelName = null;
+  log.info("Supervisor graph reset");
 }

@@ -11,7 +11,7 @@ import {
   type BaseMessage,
 } from "@langchain/core/messages";
 import type { SerializedLangGraphMessage, SessionData } from "./storage.js";
-import type { MessageItem } from "../../ui/types/messages.js";
+import type { MessageItem } from "../types/messages.js";
 import { log } from "../../logger.js";
 
 /**
