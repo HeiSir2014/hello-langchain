@@ -125,6 +125,19 @@ export function useAgentEvents() {
           setAutoCompactCompleted(true);
           break;
 
+        case 'background_task':
+          // 后台任务状态变更 — 显示为系统消息
+          setMessages(prev => [...prev, {
+            type: 'system',
+            content: event.status === 'started'
+              ? `[Background] Task "${event.taskName}" started (${event.taskId})`
+              : event.status === 'completed'
+                ? `[Background] Task "${event.taskName}" completed.${event.result ? `\n${event.result.slice(0, 200)}${event.result.length > 200 ? '...' : ''}` : ''}`
+                : `[Background] Task "${event.taskName}" failed.${event.result ? ` ${event.result.slice(0, 200)}` : ''}`,
+            id: generateMessageId(),
+          }]);
+          break;
+
         case 'done':
           setIsLoading(false);
           setStreamingContent('');

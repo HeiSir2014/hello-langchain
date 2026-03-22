@@ -31,6 +31,7 @@ export type AgentEventType =
   | { type: 'compacting'; tokenCount?: number }
   | { type: 'auto_compact'; messagesBefore: number; messagesAfter: number; summary?: string }
   | { type: 'token_usage'; tokenCount: number; contextLimit: number; percentUsed: number }
+  | { type: 'background_task'; taskId: string; taskName: string; status: 'started' | 'completed' | 'failed'; result?: string }
   | { type: 'done'; interrupted?: boolean };
 
 class AgentEventEmitter extends EventEmitter {
@@ -82,6 +83,9 @@ export const emitAutoCompact = (messagesBefore: number, messagesAfter: number, s
 
 export const emitTokenUsage = (tokenCount: number, contextLimit: number, percentUsed: number) =>
   agentEvents.emit('agent', { type: 'token_usage', tokenCount, contextLimit, percentUsed });
+
+export const emitBackgroundTask = (taskId: string, taskName: string, status: 'started' | 'completed' | 'failed', result?: string) =>
+  agentEvents.emit('agent', { type: 'background_task', taskId, taskName, status, result });
 
 export const emitDone = (interrupted = false) =>
   agentEvents.emit('agent', { type: 'done', interrupted });

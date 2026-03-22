@@ -59,6 +59,10 @@ import {
   buildDynamicInjection,
 } from "../prompt/index.js";
 import {
+  getSystemEventQueue,
+  SystemEventQueue,
+} from "../events/index.js";
+import {
   emitThinking,
   emitStreaming,
   emitToolUse,
@@ -241,13 +245,21 @@ const agentNode = async (
   }
 
   // 注入上下文到最后一条用户消息
-  // 两部分内容合并注入：
+  // 三部分内容合并注入：
   // 1. CLAUDE.md、todo 列表、memory 等上下文
   // 2. 动态 prompt sections（技能覆盖、模式指令、防幻觉参考表）
   //    这些不能放 system prompt，否则会破坏 prompt cache 前缀匹配
+  // 3. 系统事件队列（OpenClaw pattern: drain → inject）
+  //    后台任务完成、文件变更等事件在此注入
   const contextInjection = generateContextInjection();
   const dynamicPromptInjection = buildDynamicInjection();
-  const fullInjection = [contextInjection, dynamicPromptInjection].filter(Boolean).join("\n\n");
+
+  // Drain 系统事件队列（OpenClaw pattern）
+  const eventQueue = getSystemEventQueue();
+  const pendingEvents = eventQueue.drain();
+  const eventsInjection = SystemEventQueue.formatForInjection(pendingEvents);
+
+  const fullInjection = [contextInjection, dynamicPromptInjection, eventsInjection].filter(Boolean).join("\n\n");
 
   if (fullInjection) {
     for (let i = messagesWithSystem.length - 1; i >= 0; i--) {
@@ -258,6 +270,8 @@ const agentNode = async (
         log.debug("Context injected into user message", {
           contextLength: fullInjection.length,
           hasDynamicPrompt: !!dynamicPromptInjection,
+          hasPendingEvents: pendingEvents.length > 0,
+          pendingEventTypes: pendingEvents.map(e => e.type),
         });
         break;
       }
@@ -1107,6 +1121,7 @@ export async function multiTurnChat(message: string): Promise<string> {
   });
   log.userInput(message);
 
+  isAgentBusy = true;
   try {
     const result = await runGraphWithStream({
       messages: [new HumanMessage(message)],
@@ -1139,6 +1154,114 @@ export async function multiTurnChat(message: string): Promise<string> {
     emitError(error.message);
     emitDone();
     throw error;
+  } finally {
+    isAgentBusy = false;
+
+    // 处理 agent 忙碌期间积累的后台通知
+    if (pendingNotifications.length > 0) {
+      const nextNotification = pendingNotifications.shift()!;
+      log.info("Processing queued background notification after agent turn", {
+        remaining: pendingNotifications.length,
+      });
+      queueMicrotask(() => {
+        notifyAgent(nextNotification).catch(error => {
+          log.error("Failed to process queued notification", { error: error.message });
+        });
+      });
+    }
+  }
+}
+
+// ============ 后台任务通知 (Claude Code pattern) ============
+
+/**
+ * 是否有正在执行的 agent 请求（防止重入）
+ */
+let isAgentBusy = false;
+
+/**
+ * 待处理的通知队列（agent 忙碌时暂存）
+ */
+let pendingNotifications: string[] = [];
+
+/**
+ * 设置后台任务通知回调
+ *
+ * Claude Code pattern：后台任务完成时，不轮询，直接回调触发 agent 响应。
+ *
+ * 工作原理：
+ * 1. SystemEventQueue.onNotify 注册回调
+ * 2. 后台任务完成 → enqueue(strategy:"notify") → 回调触发
+ * 3. 回调中注入 HumanMessage 触发新的 agent turn
+ * 4. Agent 在新 turn 中 drain queue → 处理完成事件 → 继续响应
+ *
+ * 防重入：如果 agent 正在处理请求，通知暂存，等 agent 空闲时自动处理。
+ */
+export function setupBackgroundNotification(): void {
+  const queue = getSystemEventQueue();
+  queue.onNotify((event) => {
+    log.info("Background notification received", {
+      type: event.type,
+      id: event.id,
+    });
+
+    const message = `[Background task notification] A background task has completed. Check the system events for details and continue accordingly.`;
+
+    if (isAgentBusy) {
+      // Agent 正在忙碌，暂存通知
+      // 事件已在 queue 中，下轮 drain 时会自动注入
+      pendingNotifications.push(message);
+      log.info("Agent is busy, notification queued for next turn", {
+        pendingCount: pendingNotifications.length,
+      });
+      return;
+    }
+
+    // Agent 空闲，直接触发新 turn
+    notifyAgent(message).catch(error => {
+      log.error("Failed to notify agent of background task", { error: error.message });
+    });
+  });
+
+  log.info("Background notification callback registered");
+}
+
+/**
+ * 触发 agent 处理通知
+ *
+ * 注入一条 HumanMessage 让 agent 处理后台任务结果。
+ * Agent 在 agentNode 中会 drain queue 获取具体事件内容。
+ */
+async function notifyAgent(message: string): Promise<void> {
+  if (isAgentBusy) return;
+
+  isAgentBusy = true;
+  try {
+    emitThinking(currentModel);
+    await runGraphWithStream({
+      messages: [new HumanMessage(message)],
+    });
+    emitDone();
+  } catch (error: any) {
+    log.error("Background notification agent run failed", { error: error.message });
+    emitError(error.message);
+    emitDone();
+  } finally {
+    isAgentBusy = false;
+
+    // 处理暂存的通知
+    if (pendingNotifications.length > 0) {
+      const nextNotification = pendingNotifications.shift()!;
+      log.info("Processing queued notification", {
+        remaining: pendingNotifications.length,
+      });
+      // 使用 queueMicrotask 避免递归调用栈
+      queueMicrotask(() => {
+        notifyAgent(nextNotification).catch(error => {
+          log.error("Failed to process queued notification", { error: error.message });
+        });
+      });
+    }
   }
 }
 
